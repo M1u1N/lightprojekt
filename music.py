@@ -14,11 +14,12 @@ Verwendung:
 import time
 import math
 import sys
+import os
 import numpy as np
 from etherlight import Etherlight
 
 # ----------- USER CONFIG -----------
-ETH_URL = "10.0.10.6"
+ETH_URL = "172.16.26.138"
 NUM_LEDS = 52
 COLUMNS = 4
 SAMPLE_RATE = 44100
@@ -210,7 +211,7 @@ def test_audio_capture(device_index=None):
     print(f"\nVerwende Gerät [{device_index}]: {device_info['name']}")
     print(f"Kanäle: {device_info['maxInputChannels']}")
     print("\n🎵 Spiele jetzt Audio ab (Spotify, YouTube, etc.)")
-    print("📊 Audio-Level-Anzeige (10 Sekunden):\n")
+    print("🔊 Audio-Level-Anzeige (10 Sekunden):\n")
     
     # Audio-Stream öffnen
     try:
@@ -275,6 +276,7 @@ class EtherlightAudioVisualizer:
         self.device_name = "Unbekannt"
         self.p = None
         self.stream = None
+        self.running = True
 
     def process_audio(self, audio_data):
         # DEBUG: Zeige rohe Audio-Daten
@@ -383,44 +385,69 @@ class EtherlightAudioVisualizer:
         except:
             pass
 
-    def run(self, device_index=None):
-        self.p = pyaudio.PyAudio()
-        
-        # Finde Loopback-Gerät
-        if device_index is None:
-            try:
-                wasapi_info = self.p.get_host_api_info_by_type(pyaudio.paWASAPI)
-                default_speakers = self.p.get_device_info_by_index(wasapi_info["defaultOutputDevice"])
-                
-                print(f"Standard-Lautsprecher: {default_speakers['name']}")
-                
-                # Suche Loopback
-                if not default_speakers.get("isLoopbackDevice", False):
-                    print("Suche Loopback...")
-                    for loopback in self.p.get_loopback_device_info_generator():
-                        if default_speakers["name"] in loopback["name"]:
-                            default_speakers = loopback
-                            print(f"✓ Gefunden: {loopback['name']}")
-                            break
-                    else:
-                        print("✗ Kein Loopback gefunden!")
-                        self.p.terminate()
-                        return
-                
-                device_index = default_speakers["index"]
-                
-            except Exception as e:
-                print(f"✗ Fehler: {e}")
-                self.p.terminate()
-                return
-        
-        device_info = self.p.get_device_info_by_index(device_index)
-        self.device_name = device_info['name']
-        
-        print(f"\n🎵 Audio-Capture von: {self.device_name}")
-        print("Drücke Ctrl+C zum Beenden\n")
+    def cleanup(self):
+        """Sauberes Beenden - schließt alle Streams und gibt Ressourcen frei"""
+        self.running = False
         
         try:
+            if self.stream:
+                if self.stream.is_active():
+                    self.stream.stop_stream()
+                self.stream.close()
+                self.stream = None
+        except Exception as e:
+            print(f"Fehler beim Schließen des Streams: {e}")
+        
+        try:
+            if self.p:
+                self.p.terminate()
+                self.p = None
+        except Exception as e:
+            print(f"Fehler beim Terminieren von PyAudio: {e}")
+        
+        # Schließe stdout/stderr ordentlich
+        try:
+            sys.stdout.flush()
+            sys.stderr.flush()
+        except:
+            pass
+
+    def run(self, device_index=None):
+        try:
+            self.p = pyaudio.PyAudio()
+            
+            # Finde Loopback-Gerät
+            if device_index is None:
+                try:
+                    wasapi_info = self.p.get_host_api_info_by_type(pyaudio.paWASAPI)
+                    default_speakers = self.p.get_device_info_by_index(wasapi_info["defaultOutputDevice"])
+                    
+                    print(f"Standard-Lautsprecher: {default_speakers['name']}", flush=True)
+                    
+                    # Suche Loopback
+                    if not default_speakers.get("isLoopbackDevice", False):
+                        print("Suche Loopback...", flush=True)
+                        for loopback in self.p.get_loopback_device_info_generator():
+                            if default_speakers["name"] in loopback["name"]:
+                                default_speakers = loopback
+                                print(f"✓ Gefunden: {loopback['name']}", flush=True)
+                                break
+                        else:
+                            print("✗ Kein Loopback gefunden!", flush=True)
+                            return
+                    
+                    device_index = default_speakers["index"]
+                    
+                except Exception as e:
+                    print(f"✗ Fehler: {e}", flush=True)
+                    return
+            
+            device_info = self.p.get_device_info_by_index(device_index)
+            self.device_name = device_info['name']
+            
+            print(f"\n🎵 Audio-Capture von: {self.device_name}", flush=True)
+            print("Drücke Ctrl+C zum Beenden\n", flush=True)
+            
             self.stream = self.p.open(
                 format=pyaudio.paInt16,
                 channels=device_info['maxInputChannels'],
@@ -432,26 +459,27 @@ class EtherlightAudioVisualizer:
             
             self.stream.start_stream()
             
-            while self.stream.is_active():
-                data = self.stream.read(BLOCKSIZE, exception_on_overflow=False)
-                audio_data = np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
-                
-                # Mix zu Mono
-                if len(audio_data) > BLOCKSIZE:
-                    audio_data = audio_data.reshape(-1, device_info['maxInputChannels']).mean(axis=1)
-                
-                self.process_audio(audio_data)
+            while self.running and self.stream.is_active():
+                try:
+                    data = self.stream.read(BLOCKSIZE, exception_on_overflow=False)
+                    audio_data = np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
+                    
+                    # Mix zu Mono
+                    if len(audio_data) > BLOCKSIZE:
+                        audio_data = audio_data.reshape(-1, device_info['maxInputChannels']).mean(axis=1)
+                    
+                    self.process_audio(audio_data)
+                except Exception as e:
+                    if self.running:  # Nur Fehler anzeigen wenn noch aktiv
+                        print(f"\n✗ Fehler bei Audio-Verarbeitung: {e}", flush=True)
+                    break
                 
         except KeyboardInterrupt:
-            print("\n⏹ Stoppe...")
+            print("\n⏹ Stoppe...", flush=True)
         except Exception as e:
-            print(f"\n✗ Fehler: {e}")
+            print(f"\n✗ Fehler: {e}", flush=True)
         finally:
-            if self.stream:
-                self.stream.stop_stream()
-                self.stream.close()
-            if self.p:
-                self.p.terminate()
+            self.cleanup()
 
 
 def music_play(monitor_only=False):
@@ -466,23 +494,38 @@ def music_play(monitor_only=False):
     
     viz = EtherlightAudioVisualizer(ETH_URL, num_leds=NUM_LEDS, columns=COLUMNS, 
                                      monitor_only=monitor_only)
-    viz.run()
+    try:
+        viz.run()
+    finally:
+        viz.cleanup()
 
 
 if __name__ == '__main__':
-    if len(sys.argv) > 1:
-        cmd = sys.argv[1].lower()
-        if cmd == 'debug':
-            debug_devices()
-        elif cmd == 'test':
-            test_audio_capture()
-        elif cmd == 'monitor':
-            music_play(monitor_only=True)
+    try:
+        if len(sys.argv) > 1:
+            cmd = sys.argv[1].lower()
+            if cmd == 'debug':
+                debug_devices()
+            elif cmd == 'test':
+                test_audio_capture()
+            elif cmd == 'monitor':
+                music_play(monitor_only=True)
+            else:
+                print("Verwendung:")
+                print("  python script.py debug    - Zeigt alle Geräte")
+                print("  python script.py test     - Testet Audio-Capture")
+                print("  python script.py monitor  - Nur Audio-Monitoring")
+                print("  python script.py          - LED-Visualisierung")
         else:
-            print("Verwendung:")
-            print("  python script.py debug    - Zeigt alle Geräte")
-            print("  python script.py test     - Testet Audio-Capture")
-            print("  python script.py monitor  - Nur Audio-Monitoring")
-            print("  python script.py          - LED-Visualisierung")
-    else:
-        music_play(monitor_only=False)
+            music_play(monitor_only=False)
+    except KeyboardInterrupt:
+        print("\n⏹ Programm beendet", flush=True)
+    except Exception as e:
+        print(f"\n✗ Unerwarteter Fehler: {e}", flush=True)
+    finally:
+        # Finale Cleanup
+        try:
+            sys.stdout.flush()
+            sys.stderr.flush()
+        except:
+            pass

@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (
 )
 from etherlight import Etherlight
 anything=str(Etherlight)
-
+from music import music_play
 
 class ChildWindow(QWidget):
     def __init__(self, title: str):
@@ -49,8 +49,7 @@ class MainWindow(QWidget):
         self.window_b = None
 
     def open_window_a(self):
-        self.window_a = ChildWindow(anything)
-        self.window_a.show()
+        music_play(True)
 
     def open_window_b(self):
         self.window_b = ChildWindow("Fenster B")

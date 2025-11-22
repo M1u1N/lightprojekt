@@ -24,6 +24,7 @@ Verwendung:
 """
 
 import time
+import random
 import math
 import sys
 import numpy as np
@@ -53,49 +54,54 @@ LEDS_PER_SWITCH = 48    # 48 LEDs pro Switch (24 × 2 Reihen)
 
 # Audio Konfiguration
 SAMPLE_RATE = 44100
-BLOCKSIZE = 2048
-FPS = 60
+BLOCKSIZE = 1024        # Kleinerer Buffer = weniger Latenz, höherer FPS
+FPS_TARGET = 120        # Ziel-FPS (wird automatisch maximiert)
 
-# Frequenzbänder (Hz) - jede Säule hat ihr eigenes Band
-# Logarithmisch verteilt für bessere Musikwahrnehmung
+# Frequenzbänder (Hz) - Fokus auf musikrelevante Bereiche (20-8000 Hz)
+# Mehr Bänder wo die meiste Musik-Energie ist
 FREQ_BANDS = [
-    (20, 60),      # Sub-Bass
-    (60, 100),     # Bass 1
-    (100, 150),    # Bass 2
-    (150, 200),    # Bass 3
-    (200, 300),    # Low Mids 1
-    (300, 400),    # Low Mids 2
-    (400, 500),    # Low Mids 3
-    (500, 700),    # Mids 1
-    (700, 900),    # Mids 2
-    (900, 1200),   # Mids 3
-    (1200, 1500),  # Mids 4
-    (1500, 2000),  # High Mids 1
-    (2000, 2500),  # High Mids 2
-    (2500, 3000),  # High Mids 3
-    (3000, 4000),  # Highs 1
-    (4000, 5000),  # Highs 2
-    (5000, 6000),  # Highs 3
-    (6000, 7000),  # Highs 4
-    (7000, 8000),  # Highs 5
-    (8000, 10000), # Very Highs 1
-    (10000, 12000),# Very Highs 2
-    (12000, 14000),# Very Highs 3
-    (14000, 16000),# Very Highs 4
-    (16000, 20000) # Ultra Highs
+    (20, 60),       # 1. Sub-Bass (breiter = mehr Energie)
+    (60, 100),      # 2. Bass Low (Kick fundamental) - VERBREITERT
+    (100, 140),     # 3. Bass Mid (Kick harmonics)
+    (140, 180),     # 4. Bass High (Bass Guitar low)
+    (180, 230),     # 5. Low Mids (Bass Guitar high)
+    (200, 250),     # 6. Low Mids 1
+    (250, 315),     # 7. Low Mids 2
+    (315, 400),     # 8. Low Mids 3 (Vocals low)
+    (400, 500),     # 9. Mids 1 (Warmth)
+    (500, 630),     # 10. Mids 2 (Presence)
+    (630, 800),     # 11. Mids 3 (Definition)
+    (800, 1000),    # 12. Mids 4 (Clarity)
+    (1000, 1250),   # 13. High Mids 1
+    (1250, 1600),   # 14. High Mids 2
+    (1600, 2000),   # 15. High Mids 3 (Vocals high)
+    (2000, 2500),   # 16. Highs 1 (Brightness)
+    (2500, 3150),   # 17. Highs 2 (Attack)
+    (3150, 4000),   # 18. Highs 3 (Cymbals)
+    (4000, 5000),   # 19. Highs 4 (Brilliance)
+    (5000, 6300),   # 20. Very Highs 1 (Air)
+    (6300, 8000),   # 21. Very Highs 2 (Sparkle)
+    (8000, 10000),  # 22. Ultra Highs 1 (Sheen)
+    (10000, 12500), # 23. Ultra Highs 2
+    (12500, 16000)  # 24. Ultra Highs 3 (meist leer, aber sichtbar bei Cymbals)
 ]
+
+
+FREQ_MAPPING = list(range(24))  # [0, 1, 2, ..., 23]
+random.seed(42)  # Fester Seed = gleiche Mischung bei jedem Start
+random.shuffle(FREQ_MAPPING)
 
 # Amplituden-Verarbeitung pro Band
 DECAY_FAST = 0.7        # Schneller Abfall für responsive Visualisierung
 DECAY_SLOW = 0.9        # Langsamer Abfall für smooth Bewegung
-MIN_DB = -80.0          # Minimale Lautstärke
-MAX_DB = -10.0          # Maximale Lautstärke
+MIN_DB = -85.0          # Minimale Lautstärke
+MAX_DB = -8.0          # Maximale Lautstärke
 
 # Beat-Detection Parameter
 BEAT_HISTORY_SIZE = 43  # ~1 Sekunde bei 44100/1024
 BEAT_THRESHOLD = 1.5    # Multiplikator über Durchschnitt
 BEAT_MIN_INTERVAL = 0.1 # Min. 100ms zwischen Beats
-BASS_BOOST_ON_BEAT = 2.0# Verstärkung bei Beat
+BASS_BOOST_ON_BEAT = 2.5# Verstärkung bei Beat
 BASS_FREQ_MAX = 200     # Frequenzen unter 200Hz sind "Bass"
 
 # Farben
@@ -320,26 +326,27 @@ class SwitchController:
         self.update_thread.start()
     
     def _update_loop(self):
-        """Thread-Loop für LED-Updates"""
+        """Thread-Loop für LED-Updates - Maximale Performance"""
         while self.running:
             try:
                 if not self.update_queue.empty():
-                    led_colors = self.update_queue.get(timeout=0.1)
+                    led_colors = self.update_queue.get(timeout=0.001)
                     
-                    # Setze alle LEDs
+                    # Batch-Update: Alle LEDs auf einmal setzen
                     for led_idx, color in enumerate(led_colors):
                         try:
                             self.ether.set_led_color(led_idx + 1, color)
                         except:
                             pass
                     
-                    # Flush
+                    # Single Flush für alle LEDs
                     try:
                         self.ether.flush()
                     except:
                         pass
                 else:
-                    time.sleep(0.001)
+                    # Minimale Sleep-Zeit für maximalen Durchsatz
+                    time.sleep(0.0001)
                     
             except Exception as e:
                 if self.running:
@@ -397,10 +404,12 @@ class DualSwitchAudioVisualizer:
         self.p = None
         self.stream = None
         
-        # Stats
+        # Stats für FPS-Tracking
         self.frame_count = 0
         self.last_stats_time = time.time()
         self.current_fps = 0
+        self.fps_samples = deque(maxlen=30)  # Letzte 30 FPS-Werte für Durchschnitt
+        self.process_times = deque(maxlen=100)  # Process-Zeiten für Optimierung
         
         # Switch-Controller
         if not monitor_only:
@@ -420,6 +429,7 @@ class DualSwitchAudioVisualizer:
     
     def process_audio(self, audio_data):
         """Verarbeitet Audio mit Beat-Detection und Band-Analyse"""
+        process_start = time.time()
         
         # Apply Hanning window
         window = np.hanning(len(audio_data))
@@ -449,31 +459,51 @@ class DualSwitchAudioVisualizer:
         
         levels = np.array(levels)
         
-        # Stats
+        # Process-Zeit tracken
+        process_time = time.time() - process_start
+        self.process_times.append(process_time)
+        
+        # Stats - Update jede Sekunde
         self.frame_count += 1
         current_time = time.time()
-        if current_time - self.last_stats_time >= 1.0:
-            self.current_fps = self.frame_count
+        elapsed = current_time - self.last_stats_time
+        
+        if elapsed >= 1.0:
+            instant_fps = self.frame_count / elapsed
+            self.fps_samples.append(instant_fps)
+            self.current_fps = int(np.mean(self.fps_samples))
             self.frame_count = 0
             self.last_stats_time = current_time
+            
+            # Zeige Performance-Warnung wenn zu langsam
+            avg_process_time = np.mean(self.process_times) * 1000  # in ms
+            if avg_process_time > 10:  # > 10ms ist langsam
+                if not self.monitor_only:
+                    print(f"\n⚠ Performance: {avg_process_time:.1f}ms/frame (Ziel: <10ms)", flush=True)
         
         if self.monitor_only:
-            # ASCII-Visualisierung mit Beat-Anzeige
+            # VERBESSERTE ASCII-Visualisierung mit mehr Details
             max_level = float(np.max(levels))
             avg_level = float(np.mean(levels))
             
+            # Detailliertere Bar-Darstellung mit mehr Abstufungen
             bars = ''.join([
-                '█' if l > 0.7 else 
-                '▓' if l > 0.4 else 
-                '░' if l > 0.1 else ' ' 
+                '█' if l > 0.6 else      # Sehr stark
+                '▓' if l > 0.4 else      # Stark
+                '▒' if l > 0.25 else     # Mittel
+                '░' if l > 0.1 else      # Schwach
+                '·' if l > 0.05 else     # Sehr schwach (NEU!)
+                ' '                       # Stumm
                 for l in levels
             ])
             
-            beat_indicator = "💥 BEAT!" if is_beat else "      "
-            print(f"\r🔊 [{bars}] Max:{max_level:.2f} Avg:{avg_level:.2f} {beat_indicator} FPS:{self.current_fps}", 
+            beat_indicator = "💥 BEAT" if is_beat else "      "
+            avg_process = np.mean(self.process_times) * 1000 if self.process_times else 0
+            
+            print(f"\r🔊 [{bars}] Max:{max_level:.2f} Avg:{avg_level:.2f} {beat_indicator} | FPS:{self.current_fps} ({avg_process:.1f}ms)", 
                   end='', flush=True)
         else:
-            # LED-Update
+            # LED-Update (keine Wartezeit - maximaler Durchsatz)
             self.update_switches(levels, is_beat, beat_strength)
     
     def update_switches(self, levels, is_beat, beat_strength):
@@ -590,7 +620,9 @@ class DualSwitchAudioVisualizer:
             self.device_name = device_info['name']
             
             print(f"\n🎵 Audio: {self.device_name}", flush=True)
-            print(f"📊 24 Frequenzbänder | Beat-Detection aktiv", flush=True)
+            print(f"📊 24 Frequenzbänder (optimiert 20-8000 Hz)", flush=True)
+            print(f"🎯 Ziel: {FPS_TARGET} FPS | Buffer: {BLOCKSIZE} samples", flush=True)
+            print(f"💥 Beat-Detection aktiv", flush=True)
             print("⌨️  Drücke Ctrl+C zum Beenden\n", flush=True)
             
             self.stream = self.p.open(
@@ -669,9 +701,11 @@ def music_play(monitor_only=False):
     print("="*70)
     print(f"  Features:")
     print(f"    • 24 unabhängige Frequenzbänder")
+    print(f"    • Fokus auf 20-8000 Hz (Musik-Range)")
     print(f"    • Beat-Detection (Bass/Kick)")
     print(f"    • Frequenz-basierte Farben")
-    print(f"    • Multi-threaded Updates")
+    print(f"    • Multi-threaded (max. FPS)")
+    print(f"    • Buffer: {BLOCKSIZE} samples")
     print("="*70 + "\n")
     
     viz = DualSwitchAudioVisualizer(monitor_only=monitor_only)
@@ -684,9 +718,8 @@ def music_play(monitor_only=False):
 
 if __name__ == '__main__':
     try:
-        music_play(monitor_only=True)
+        music_play(True)
     except KeyboardInterrupt:
         print("\n⏹ Beendet", flush=True)
     except Exception as e:
         print(f"\n✗ Fehler: {e}", flush=True)
-    

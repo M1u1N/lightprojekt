@@ -38,6 +38,7 @@ class Etherlight:
         self.ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         
         # Verbindung herstellen
+        print(f"Versuche SSH-Verbindung zu {self.user}@{ip} herzustellen...")
         try:
             self.ssh.connect(
                 hostname=ip,
@@ -45,10 +46,21 @@ class Etherlight:
                 password=password,
                 key_filename=key_filename,
                 look_for_keys=True if not password else False,
-                allow_agent=True if not password else False
+                allow_agent=True if not password else False,
+                timeout=10
             )
+            print(f"✓ SSH-Verbindung erfolgreich hergestellt zu {self.user}@{ip}")
+        except paramiko.AuthenticationException:
+            print(f"✗ SSH-Verbindung fehlgeschlagen: Authentifizierung abgelehnt")
+            raise
+        except paramiko.SSHException as e:
+            print(f"✗ SSH-Verbindung fehlgeschlagen: SSH-Fehler - {e}")
+            raise
+        except TimeoutError:
+            print(f"✗ SSH-Verbindung fehlgeschlagen: Timeout bei Verbindung zu {ip}")
+            raise
         except Exception as e:
-            print(f"SSH-Verbindung fehlgeschlagen: {e}")
+            print(f"✗ SSH-Verbindung fehlgeschlagen: {e}")
             raise
         
         self.write_command('echo "0" > /proc/led/led_mode', True)

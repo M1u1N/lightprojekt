@@ -1,469 +1,370 @@
 """
-Etherlight Dual-Switch Audio Visualizer mit Beat-Detection
+Etherlight Dual-Switch Audio Visualizer - OPTIMIZED VERSION
 
-Soundbar-Aufbau:
+Soundbar-Aufbau (KORRIGIERT):
     - 24 Säulen (horizontal) × 4 LEDs hoch (vertikal) = 96 LEDs gesamt
-    - Unten:  Switch 1 (Ports 1-48)  - Reihe 1+2 (24 Säulen × 2 LEDs)
-    - Oben:   Switch 2 (Ports 1-48)  - Reihe 3+4 (24 Säulen × 2 LEDs)
+    - Switch Unten: Port 1,3,5,7... = Reihe 1 | Port 2,4,6,8... = Reihe 2
+    - Switch Oben:  Port 1,3,5,7... = Reihe 3 | Port 2,4,6,8... = Reihe 4
 
-Features:
-    ✓ Beat-Detection für Bass/Kick-Drums
-    ✓ Unabhängige Frequenzbänder pro Säule
-    ✓ Separate Amplituden-Berechnung
-    ✓ Dynamische Bass-Verstärkung
-    ✓ Multi-threaded Updates
+Performance-Optimierungen:
+    ✓ Vorberechnete LED-Mappings
+    ✓ Minimale Array-Operationen
+    ✓ Direkte RGB-Berechnung ohne HSV
+    ✓ Batch-Updates ohne Queue
+    ✓ Numpy Vectorization
+    ✓ Cache-freundliche Datenstrukturen
 
 Installation:
     pip install numpy pyaudiowpatch etherlight scipy
-
-Verwendung:
-    python script.py          # LED-Visualisierung
-    python script.py test     # LED-Mapping Test
-    python script.py monitor  # Audio-Monitoring
-    python script.py debug    # Audio-Geräte anzeigen
 """
 
 import time
 import random
-import math
 import sys
 import numpy as np
 import threading
-from queue import Queue
 from collections import deque
 from etherlightwin import Etherlight
 
-# Scipy für bessere Filterung (optional)
+# Scipy für bessere Filterung
 try:
     from scipy import signal
     HAS_SCIPY = True
 except ImportError:
     HAS_SCIPY = False
-    print("⚠ Scipy nicht gefunden - Beat-Detection limitiert")
-    print("  Installiere mit: pip install scipy")
+
+# ----------- KORREKTE LED-MAPPINGS -----------
+FIRST_ROW = [1,3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,35,37,39,41,43,45,47]
+SECOND_ROW = [2,4,6,8,10,12,14,16,18,20,22,24,26,28,30,32,34,36,38,40,42,44,46,48]
 
 # ----------- USER CONFIG -----------
-# Switch IPs
-SW_UNTEN_IP = "172.16.146.212"    # Unterer Switch (Reihe 1+2)
-SW_OBEN_IP = "172.16.26.138"   # Oberer Switch (Reihe 3+4)
+SW_UNTEN_IP = "172.16.146.212"
+SW_OBEN_IP = "172.16.26.138"
 
-# Soundbar Konfiguration
-NUM_COLUMNS = 24        # 24 Säulen horizontal
-LEDS_PER_COLUMN = 4     # 4 LEDs pro Säule (vertikal)
-LEDS_PER_SWITCH = 48    # 48 LEDs pro Switch (24 × 2 Reihen)
+NUM_COLUMNS = 24
+LEDS_PER_COLUMN = 4
 
-# Audio Konfiguration
+# Audio Config - Optimiert für Speed
 SAMPLE_RATE = 44100
-BLOCKSIZE = 1024        # Kleinerer Buffer = weniger Latenz, höherer FPS
-FPS_TARGET = 120        # Ziel-FPS (wird automatisch maximiert)
+BLOCKSIZE = 512  # Kleiner = weniger Latenz aber mehr CPU
 
-# Frequenzbänder (Hz) - Fokus auf musikrelevante Bereiche (20-8000 Hz)
-# Mehr Bänder wo die meiste Musik-Energie ist
+# Frequenzbänder - 24 Bänder optimiert für Musik
 FREQ_BANDS = [
-    (20, 60),       # 1. Sub-Bass (breiter = mehr Energie)
-    (60, 100),      # 2. Bass Low (Kick fundamental) - VERBREITERT
-    (100, 140),     # 3. Bass Mid (Kick harmonics)
-    (140, 180),     # 4. Bass High (Bass Guitar low)
-    (180, 230),     # 5. Low Mids (Bass Guitar high)
-    (200, 250),     # 6. Low Mids 1
-    (250, 315),     # 7. Low Mids 2
-    (315, 400),     # 8. Low Mids 3 (Vocals low)
-    (400, 500),     # 9. Mids 1 (Warmth)
-    (500, 630),     # 10. Mids 2 (Presence)
-    (630, 800),     # 11. Mids 3 (Definition)
-    (800, 1000),    # 12. Mids 4 (Clarity)
-    (1000, 1250),   # 13. High Mids 1
-    (1250, 1600),   # 14. High Mids 2
-    (1600, 2000),   # 15. High Mids 3 (Vocals high)
-    (2000, 2500),   # 16. Highs 1 (Brightness)
-    (2500, 3150),   # 17. Highs 2 (Attack)
-    (3150, 4000),   # 18. Highs 3 (Cymbals)
-    (4000, 5000),   # 19. Highs 4 (Brilliance)
-    (5000, 6300),   # 20. Very Highs 1 (Air)
-    (6300, 8000),   # 21. Very Highs 2 (Sparkle)
-    (8000, 10000),  # 22. Ultra Highs 1 (Sheen)
-    (10000, 12500), # 23. Ultra Highs 2
-    (12500, 16000)  # 24. Ultra Highs 3 (meist leer, aber sichtbar bei Cymbals)
+    (0, 60) ,(60, 100), (80, 140), (140, 180), (170, 230),
+    (230, 280), (280, 350), (350, 440), (440, 550), (550, 700),
+    (700, 880), (880, 1100), (1100, 1400), (1400, 1760), (1760, 2200),
+    (2200, 2800), (2800, 3500), (3500, 4400), (4400, 5500), (5500, 7000),
+    (7000, 8800), (8800, 11000), (11000, 14000), (14000, 18000)
 ]
 
 
-FREQ_MAPPING = list(range(24))  # [0, 1, 2, ..., 23]
-random.seed(42)  # Fester Seed = gleiche Mischung bei jedem Start
-random.shuffle(FREQ_MAPPING)
+# Verarbeitung
+DECAY_FAST = 0.80       # Noch langsamer = LEDs bleiben noch länger an
+DECAY_SLOW = 0.94       # Noch langsamer = smooth
+MIN_DB = -95.0          # Noch niedriger = noch empfindlicher
+MAX_DB = -3.0           # Noch höher = mehr Dynamik
+BASS_BOOST = 1.8        # Extra Verstärkung für Bass
+MID_BOOST = 2.0         # Extra Verstärkung für Mitten (500-2000Hz)
+HIGH_BOOST = 2.2        # Extra Verstärkung für Höhen (>5kHz)
 
-# Amplituden-Verarbeitung pro Band
-DECAY_FAST = 0.7        # Schneller Abfall für responsive Visualisierung
-DECAY_SLOW = 0.9        # Langsamer Abfall für smooth Bewegung
-MIN_DB = -85.0          # Minimale Lautstärke
-MAX_DB = -8.0          # Maximale Lautstärke
+# Beat-Detection
+BEAT_HISTORY_SIZE = 43
+BEAT_THRESHOLD = 1.5
+BEAT_MIN_INTERVAL = 0.1
+BASS_BOOST_ON_BEAT = 2.5
+BASS_FREQ_MAX = 200
 
-# Beat-Detection Parameter
-BEAT_HISTORY_SIZE = 43  # ~1 Sekunde bei 44100/1024
-BEAT_THRESHOLD = 1.5    # Multiplikator über Durchschnitt
-BEAT_MIN_INTERVAL = 0.1 # Min. 100ms zwischen Beats
-BASS_BOOST_ON_BEAT = 2.5# Verstärkung bei Beat
-BASS_FREQ_MAX = 200     # Frequenzen unter 200Hz sind "Bass"
+DISPLAY_ORDER = list(range(NUM_COLUMNS))
+random.shuffle(DISPLAY_ORDER)
 
-# Farben
-HUE_BASS = 0.0          # Rot für Bass/Beat
-HUE_MIDS = 60/360.0     # Gelb für Mitten
-HUE_HIGHS = 200/360.0   # Blau für Höhen
 
-# Versuche PyAudioWPatch zu laden
+# PyAudio
 try:
     import pyaudiowpatch as pyaudio
     HAS_PYAUDIO = True
-    print("✓ PyAudioWPatch geladen")
 except ImportError:
     print("✗ PyAudioWPatch nicht gefunden!")
-    print("  Installiere mit: pip install pyaudiowpatch")
     HAS_PYAUDIO = False
     sys.exit(1)
 
 
-def hsv_to_rgb255(h, s, v):
-    """Konvertiert HSV zu RGB (0-255)"""
-    if s == 0.0:
-        r = g = b = int(v * 255)
-        return (r, g, b)
-    i = int(h * 6.0)
-    f = (h * 6.0) - i
-    p = v * (1.0 - s)
-    q = v * (1.0 - s * f)
-    t = v * (1.0 - s * (1.0 - f))
-    i = i % 6
-    if i == 0:
-        r, g, b = v, t, p
-    elif i == 1:
-        r, g, b = q, v, p
-    elif i == 2:
-        r, g, b = p, v, t
-    elif i == 3:
-        r, g, b = p, q, v
-    elif i == 4:
-        r, g, b = t, p, v
-    elif i == 5:
-        r, g, b = v, p, q
-    return (int(r * 255), int(g * 255), int(b * 255))
+# ----------- OPTIMIERTE COLOR FUNCTIONS -----------
+# Vorberechnete Lookup-Tables für schnellere Farbberechnung
+COLOR_LUT_SIZE = 256
+_color_lut = None
+
+def init_color_lut():
+    """Erstellt Lookup-Table für RGB-Farben basierend auf Frequenz"""
+    global _color_lut
+    _color_lut = np.zeros((COLOR_LUT_SIZE, 3), dtype=np.uint8)
+    
+    for i in range(COLOR_LUT_SIZE):
+        # 0 = Bass (Rot), 128 = Mids (Gelb), 255 = Highs (Blau)
+        t = i / COLOR_LUT_SIZE
+        
+        if t < 0.33:  # Bass -> Mids
+            s = t / 0.33
+            r = int(255 * (1 - s) + 255 * s)
+            g = int(0 * (1 - s) + 255 * s)
+            b = 0
+        elif t < 0.66:  # Mids -> Highs
+            s = (t - 0.33) / 0.33
+            r = int(255 * (1 - s) + 100 * s)
+            g = int(255 * (1 - s) + 150 * s)
+            b = int(0 * (1 - s) + 255 * s)
+        else:  # Highs
+            s = (t - 0.66) / 0.34
+            r = int(100 * (1 - s) + 50 * s)
+            g = int(150 * (1 - s) + 100 * s)
+            b = int(255 * (1 - s) + 255 * s)
+        
+        _color_lut[i] = [r, g, b]
+
+def get_color_fast(freq_max, level, beat_boost=1.0):
+    """Ultra-schnelle Farbberechnung mit LUT"""
+    # Frequenz zu LUT-Index
+    if freq_max <= 200:
+        idx = 0
+    elif freq_max >= 18000:
+        idx = COLOR_LUT_SIZE - 1
+    else:
+        # Log-Scale für bessere Verteilung
+        idx = int((np.log10(freq_max) - np.log10(200)) / 
+                  (np.log10(18000) - np.log10(200)) * COLOR_LUT_SIZE)
+        idx = max(0, min(COLOR_LUT_SIZE - 1, idx))
+    
+    # Basis-Farbe aus LUT
+    r, g, b = _color_lut[idx]
+    
+    # Helligkeit basierend auf Level
+    brightness = 0.3 + 0.7 * level * beat_boost
+    brightness = min(1.0, brightness)
+    
+    return (int(r * brightness), int(g * brightness), int(b * brightness))
 
 
 def mag_to_db(mag):
-    """Konvertiert Magnitude zu Dezibel"""
-    mag = max(mag, 1e-12)
-    return 20.0 * math.log10(mag)
+    """Schnelle dB-Konvertierung"""
+    return 20.0 * np.log10(np.maximum(mag, 1e-12))
 
-
-def db_scale(db, min_db=MIN_DB, max_db=MAX_DB):
-    """Skaliert dB-Wert auf 0-1"""
-    if db <= min_db:
-        return 0.0
-    if db >= max_db:
-        return 1.0
-    return (db - min_db) / (max_db - min_db)
-
-
-def debug_devices():
-    """Zeigt alle verfügbaren Audio-Geräte an"""
-    print("\n" + "="*70)
-    print("DEBUG: Alle verfügbaren Audio-Geräte")
-    print("="*70)
-    
-    p = pyaudio.PyAudio()
-    
-    try:
-        wasapi_info = p.get_host_api_info_by_type(pyaudio.paWASAPI)
-        print(f"\n✓ WASAPI verfügbar")
-    except OSError:
-        print("\n✗ WASAPI nicht verfügbar!")
-        p.terminate()
-        return
-    
-    print(f"\nAnzahl Geräte: {p.get_device_count()}")
-    
-    loopback_devices = []
-    
-    for i in range(p.get_device_count()):
-        info = p.get_device_info_by_index(i)
-        
-        if info.get('isLoopbackDevice', False):
-            loopback_devices.append((i, info))
-            print(f"\n[{i}] 🔁 LOOPBACK")
-            print(f"  {info['name']}")
-    
-    print("\n" + "="*70)
-    if loopback_devices:
-        print("✓ LOOPBACK-GERÄTE:")
-        for idx, info in loopback_devices:
-            print(f"  [{idx}] {info['name']}")
-    print("="*70 + "\n")
-    
-    p.terminate()
+def db_scale_vec(db_array):
+    """Vektorisierte dB-Skalierung"""
+    return np.clip((db_array - MIN_DB) / (MAX_DB - MIN_DB), 0.0, 1.0)
 
 
 class BeatDetector:
-    """Erkennt Beats in Bass-Frequenzen"""
+    """Optimierter Beat-Detector"""
     
     def __init__(self, history_size=BEAT_HISTORY_SIZE):
         self.bass_history = deque(maxlen=history_size)
         self.last_beat_time = 0
         self.beat_strength = 0.0
+        self._history_array = np.zeros(history_size)
+        self._idx = 0
     
     def detect_beat(self, bass_energy):
-        """
-        Erkennt Beat basierend auf Bass-Energie
-        Returns: (is_beat, beat_strength)
-        """
-        self.bass_history.append(bass_energy)
+        """Schnelle Beat-Detection mit Ring-Buffer"""
+        # Ring-Buffer für schnelleren Zugriff
+        self._history_array[self._idx] = bass_energy
+        self._idx = (self._idx + 1) % len(self._history_array)
         
-        if len(self.bass_history) < 10:
+        if np.count_nonzero(self._history_array) < 10:
             return False, 0.0
         
-        # Berechne Durchschnitt und Varianz
-        avg = np.mean(self.bass_history)
-        std = np.std(self.bass_history)
-        
-        # Beat wenn aktuelle Energie deutlich über Durchschnitt
+        # Numpy-optimierte Statistiken
+        avg = np.mean(self._history_array)
+        std = np.std(self._history_array)
         threshold = avg + (std * BEAT_THRESHOLD)
         
         current_time = time.time()
         is_beat = False
         
         if bass_energy > threshold:
-            # Verhindere zu schnelle Beat-Erkennung
             if current_time - self.last_beat_time > BEAT_MIN_INTERVAL:
                 is_beat = True
                 self.last_beat_time = current_time
-                # Stärke basiert auf wie weit über Threshold
-                self.beat_strength = min((bass_energy - avg) / (threshold - avg), 2.0)
+                self.beat_strength = min((bass_energy - avg) / max(threshold - avg, 0.001), 2.0)
         
-        # Decay beat strength
         self.beat_strength *= 0.8
-        
         return is_beat, self.beat_strength
 
 
-class FrequencyBandAnalyzer:
-    """Analysiert einzelne Frequenzbänder unabhängig"""
+class FastBandAnalyzer:
+    """Ultra-schneller Frequenzband-Analyzer"""
     
-    def __init__(self, freq_min, freq_max, sample_rate=SAMPLE_RATE):
+    def __init__(self, band_idx, freq_min, freq_max, sample_rate=SAMPLE_RATE):
+        self.band_idx = band_idx
         self.freq_min = freq_min
         self.freq_max = freq_max
-        self.sample_rate = sample_rate
         self.prev_level = 0.0
         
-        # Bestimme Decay basierend auf Frequenz
-        # Bass = langsamer Decay, Höhen = schneller Decay
+        # Decay basierend auf Frequenz
         if freq_max < 200:
             self.decay = DECAY_SLOW
         elif freq_min > 5000:
             self.decay = DECAY_FAST
         else:
-            # Interpoliere zwischen slow und fast
             t = (freq_min - 200) / (5000 - 200)
             self.decay = DECAY_SLOW + (DECAY_FAST - DECAY_SLOW) * t
-    
-    def analyze(self, fft_data, freqs):
-        """
-        Analysiert FFT-Daten für dieses Frequenzband
-        Returns: normalized level (0-1)
-        """
-        # Finde Indices für dieses Frequenzband
-        idx = np.where((freqs >= self.freq_min) & (freqs <= self.freq_max))[0]
         
-        if idx.size == 0:
-            # Keine Daten in diesem Band
+        # Vorberechne FFT-Indices für dieses Band
+        self.fft_size = BLOCKSIZE // 2 + 1
+        freqs = np.fft.rfftfreq(BLOCKSIZE, 1.0 / sample_rate)
+        self.idx_mask = (freqs >= freq_min) & (freqs <= freq_max)
+        self.has_data = np.any(self.idx_mask)
+    
+    def analyze_fast(self, fft_data):
+        """Optimierte Analyse ohne Array-Operationen wo möglich"""
+        if not self.has_data:
             self.prev_level *= self.decay
             return self.prev_level
         
-        # Berechne durchschnittliche Amplitude in diesem Band
-        band_amplitude = np.mean(fft_data[idx])
+        # Numpy-Vektor-Operationen
+        band_amplitude = np.mean(fft_data[self.idx_mask])
+        band_amplitude = band_amplitude / (BLOCKSIZE * 2)
         
-        # Normalisierung: FFT gibt große Werte
-        # Teile durch Anzahl Samples für Normalisierung
-        band_amplitude = band_amplitude / (len(fft_data) * 2)
+        # Extra Boost basierend auf Frequenzbereich
+        if self.freq_min > 5000:
+            # Hohe Frequenzen (>5kHz)
+            band_amplitude *= HIGH_BOOST
+        elif 500 <= self.freq_min <= 2000:
+            # Mitten (500-2000Hz) - oft schwach
+            band_amplitude *= MID_BOOST
+        elif self.freq_max < 200:
+            # Bass (<200Hz)
+            band_amplitude *= BASS_BOOST
         
-        # Konvertiere zu dB
-        band_db = mag_to_db(band_amplitude)
+        # Schnelle dB-Konvertierung
+        band_db = 20.0 * np.log10(max(band_amplitude, 1e-12))
+        level = max(0.0, min(1.0, (band_db - MIN_DB) / (MAX_DB - MIN_DB)))
         
-        # Skaliere auf 0-1
-        level = db_scale(band_db)
-        
-        # Smooth mit Decay (aber nimm Maximum von neu und decay)
-        # Das gibt responsive peaks aber smooth decay
+        # Smooth decay
         self.prev_level = max(level, self.prev_level * self.decay)
-        
         return self.prev_level
-    
-    def get_color_hue(self):
-        """Bestimmt Farbe basierend auf Frequenz"""
-        if self.freq_max <= 200:
-            return HUE_BASS  # Rot für Bass
-        elif self.freq_min >= 5000:
-            return HUE_HIGHS  # Blau für Höhen
-        else:
-            # Interpoliere zwischen Bass und Highs über Mitten
-            t = (self.freq_min - 200) / (5000 - 200)
-            return HUE_BASS + (HUE_HIGHS - HUE_BASS) * t
 
 
-class SwitchController:
-    """Kontrolliert einen einzelnen Switch mit Threading"""
+class OptimizedSwitchController:
+    """Maximale Performance Switch-Controller ohne Threading-Overhead"""
     
-    def __init__(self, ip, name, num_leds=LEDS_PER_SWITCH):
+    def __init__(self, ip, name):
         self.ip = ip
         self.name = name
-        self.num_leds = num_leds
-        
-        print(f"🔌 Verbinde mit {name} ({ip})...", flush=True)
         self.ether = Etherlight(ip)
-        time.sleep(0.5)
-        print(f"✓ {name} verbunden ({num_leds} LEDs)", flush=True)
+        time.sleep(0.3)
+        print(f"✓ {name} verbunden", flush=True)
         
-        # Threading
-        self.update_queue = Queue(maxsize=10)
-        self.running = True
-        self.update_thread = threading.Thread(target=self._update_loop, daemon=True)
-        self.update_thread.start()
+        # Vorallokierte Arrays
+        self._led_buffer = [(0, 0, 0)] * 48
     
-    def _update_loop(self):
-        """Thread-Loop für LED-Updates - Maximale Performance"""
-        while self.running:
-            try:
-                if not self.update_queue.empty():
-                    led_colors = self.update_queue.get(timeout=0.001)
-                    
-                    # Batch-Update: Alle LEDs auf einmal setzen
-                    for led_idx, color in enumerate(led_colors):
-                        try:
-                            self.ether.set_led_color(led_idx + 1, color)
-                        except:
-                            pass
-                    
-                    # Single Flush für alle LEDs
-                    try:
-                        self.ether.flush()
-                    except:
-                        pass
-                else:
-                    # Minimale Sleep-Zeit für maximalen Durchsatz
-                    time.sleep(0.0001)
-                    
-            except Exception as e:
-                if self.running:
-                    print(f"✗ {self.name} Update-Fehler: {e}", flush=True)
-    
-    def update_leds(self, led_colors):
-        """Aktualisiert LEDs"""
-        if len(led_colors) != self.num_leds:
-            return
-        
+    def update_direct(self, led_colors):
+        """Direktes Update ohne Queue - maximale Geschwindigkeit"""
         try:
-            if self.update_queue.full():
-                self.update_queue.get_nowait()
-            self.update_queue.put_nowait(led_colors)
+            for led_idx, color in enumerate(led_colors):
+                self.ether.set_led_color(led_idx + 1, color)
+            self.ether.flush()
         except:
             pass
     
     def cleanup(self):
-        """Beendet Thread"""
-        self.running = False
-        if self.update_thread.is_alive():
-            self.update_thread.join(timeout=2.0)
-        
-        # LEDs aus
+        """Cleanup"""
         try:
-            for i in range(1, self.num_leds + 1):
+            for i in range(1, 49):
                 self.ether.set_led_color(i, (0, 0, 0))
             self.ether.flush()
         except:
             pass
-        
         print(f"✓ {self.name} beendet", flush=True)
 
 
-class DualSwitchAudioVisualizer:
-    """
-    Audio Visualizer mit Beat-Detection und unabhängigen Frequenzbändern
-    """
+class OptimizedDualSwitchVisualizer:
+    """Maximale Performance Visualizer"""
     
     def __init__(self, monitor_only=False):
         self.monitor_only = monitor_only
         self.running = True
         
-        # Initialisiere Frequenzband-Analyzer für jede Säule
-        self.band_analyzers = []
-        for freq_min, freq_max in FREQ_BANDS:
-            analyzer = FrequencyBandAnalyzer(freq_min, freq_max)
-            self.band_analyzers.append(analyzer)
+        # Initialisiere Color LUT
+        init_color_lut()
+        
+        # Band-Analyzer mit vorberechneten Indices
+        self.band_analyzers = [
+            FastBandAnalyzer(i, fmin, fmax) 
+            for i, (fmin, fmax) in enumerate(FREQ_BANDS)
+        ]
         
         # Beat-Detector
         self.beat_detector = BeatDetector()
         
-        # Audio
-        self.device_name = "Unbekannt"
-        self.p = None
-        self.stream = None
+        # Vorallokierte Arrays für maximale Performance
+        self._levels = np.zeros(NUM_COLUMNS, dtype=np.float32)
+        self._leds_unten = [(0, 0, 0)] * 48
+        self._leds_oben = [(0, 0, 0)] * 48
         
-        # Stats für FPS-Tracking
+        # Vorberechnete LED-Mappings für O(1) Zugriff
+        self._column_to_leds = []
+        for col in range(NUM_COLUMNS):
+            self._column_to_leds.append({
+                'row1': FIRST_ROW[col] - 1,   # Unten Reihe 1
+                'row2': SECOND_ROW[col] - 1,  # Unten Reihe 2
+                'row3': FIRST_ROW[col] - 1,   # Oben Reihe 3
+                'row4': SECOND_ROW[col] - 1   # Oben Reihe 4
+            })
+        
+        # FFT Window vorberechnen
+        self._window = np.hanning(BLOCKSIZE)
+        
+        # Stats
         self.frame_count = 0
         self.last_stats_time = time.time()
         self.current_fps = 0
-        self.fps_samples = deque(maxlen=30)  # Letzte 30 FPS-Werte für Durchschnitt
-        self.process_times = deque(maxlen=100)  # Process-Zeiten für Optimierung
+        self.fps_samples = deque(maxlen=30)
         
-        # Switch-Controller
+        # Audio
+        self.p = None
+        self.stream = None
+        
+        # Switches
         if not monitor_only:
-            print("\n🎛️  Initialisiere Dual-Switch Soundbar...")
-            print(f"   └─ Unten: {SW_UNTEN_IP} (Reihe 1+2)")
-            print(f"   └─ Oben:  {SW_OBEN_IP} (Reihe 3+4)")
-            print(f"   └─ 24 unabhängige Frequenzbänder")
-            print(f"   └─ Beat-Detection aktiviert\n")
-            
-            self.sw_unten = SwitchController(SW_UNTEN_IP, "SW_UNTEN")
-            self.sw_oben = SwitchController(SW_OBEN_IP, "SW_OBEN")
-            
+            print("\n🎛️  Initialisiere Switches...")
+            self.sw_unten = OptimizedSwitchController(SW_UNTEN_IP, "SW_UNTEN")
+            self.sw_oben = OptimizedSwitchController(SW_OBEN_IP, "SW_OBEN")
             print("✓ Beide Switches bereit!\n")
         else:
             self.sw_unten = None
             self.sw_oben = None
     
-    def process_audio(self, audio_data):
-        """Verarbeitet Audio mit Beat-Detection und Band-Analyse"""
-        process_start = time.time()
+    def process_audio_fast(self, audio_data):
+        """Ultra-optimierte Audio-Verarbeitung"""
+        # Stelle sicher dass audio_data die richtige Länge hat
+        if len(audio_data) != BLOCKSIZE:
+            if len(audio_data) < BLOCKSIZE:
+                # Padding mit Nullen
+                audio_data = np.pad(audio_data, (0, BLOCKSIZE - len(audio_data)), mode='constant')
+            else:
+                # Trimmen auf BLOCKSIZE
+                audio_data = audio_data[:BLOCKSIZE]
         
-        # Apply Hanning window
-        window = np.hanning(len(audio_data))
-        audio_data = audio_data * window
+        # Windowing
+        audio_data = audio_data * self._window
         
         # FFT
         fft = np.abs(np.fft.rfft(audio_data))
-        freqs = np.fft.rfftfreq(len(audio_data), 1.0 / SAMPLE_RATE)
         
-        # Berechne Bass-Energie für Beat-Detection
-        bass_idx = np.where(freqs <= BASS_FREQ_MAX)[0]
-        bass_energy = np.mean(fft[bass_idx]) if bass_idx.size > 0 else 0.0
-        
-        # Beat-Detection
+        # Bass-Energie für Beat
+        bass_energy = np.mean(fft[:int(BASS_FREQ_MAX * BLOCKSIZE / SAMPLE_RATE)])
         is_beat, beat_strength = self.beat_detector.detect_beat(bass_energy)
         
-        # Analysiere jedes Frequenzband unabhängig
-        levels = []
-        for analyzer in self.band_analyzers:
-            level = analyzer.analyze(fft, freqs)
+        # Analysiere alle Bänder parallel
+        for i, analyzer in enumerate(self.band_analyzers):
+            level = analyzer.analyze_fast(fft)
             
-            # Verstärke Bass-Bänder bei Beat
+            # Bass-Boost bei Beat
             if analyzer.freq_max <= BASS_FREQ_MAX and is_beat:
                 level = min(level * (1.0 + beat_strength), 1.0)
             
-            levels.append(level)
+            self._levels[i] = level
         
-        levels = np.array(levels)
-        
-        # Process-Zeit tracken
-        process_time = time.time() - process_start
-        self.process_times.append(process_time)
-        
-        # Stats - Update jede Sekunde
+        # Stats
         self.frame_count += 1
         current_time = time.time()
         elapsed = current_time - self.last_stats_time
@@ -474,88 +375,77 @@ class DualSwitchAudioVisualizer:
             self.current_fps = int(np.mean(self.fps_samples))
             self.frame_count = 0
             self.last_stats_time = current_time
-            
-            # Zeige Performance-Warnung wenn zu langsam
-            avg_process_time = np.mean(self.process_times) * 1000  # in ms
-            if avg_process_time > 10:  # > 10ms ist langsam
-                if not self.monitor_only:
-                    print(f"\n⚠ Performance: {avg_process_time:.1f}ms/frame (Ziel: <10ms)", flush=True)
         
         if self.monitor_only:
-            # VERBESSERTE ASCII-Visualisierung mit mehr Details
-            max_level = float(np.max(levels))
-            avg_level = float(np.mean(levels))
-            
-            # Detailliertere Bar-Darstellung mit mehr Abstufungen
-            bars = ''.join([
-                '█' if l > 0.6 else      # Sehr stark
-                '▓' if l > 0.4 else      # Stark
-                '▒' if l > 0.25 else     # Mittel
-                '░' if l > 0.1 else      # Schwach
-                '·' if l > 0.05 else     # Sehr schwach (NEU!)
-                ' '                       # Stumm
-                for l in levels
-            ])
-            
-            beat_indicator = "💥 BEAT" if is_beat else "      "
-            avg_process = np.mean(self.process_times) * 1000 if self.process_times else 0
-            
-            print(f"\r🔊 [{bars}] Max:{max_level:.2f} Avg:{avg_level:.2f} {beat_indicator} | FPS:{self.current_fps} ({avg_process:.1f}ms)", 
-                  end='', flush=True)
+            self._print_monitor()
         else:
-            # LED-Update (keine Wartezeit - maximaler Durchsatz)
-            self.update_switches(levels, is_beat, beat_strength)
+            self._update_leds_fast(is_beat, beat_strength)
     
-    def update_switches(self, levels, is_beat, beat_strength):
-        """Verteilt Levels auf beide Switches mit Beat-Effekten"""
-        if self.sw_unten is None or self.sw_oben is None:
-            return
+    def _print_monitor(self):
+        """Monitoring-Ausgabe mit Säulen-Beschriftung"""
+        bars = ''.join([
+            '█' if l > 0.6 else '▓' if l > 0.4 else 
+            '▒' if l > 0.25 else '░' if l > 0.1 else 
+            '·' if l > 0.05 else ' '
+            for l in self._levels
+        ])
         
-        leds_unten = [(0, 0, 0)] * LEDS_PER_SWITCH
-        leds_oben = [(0, 0, 0)] * LEDS_PER_SWITCH
+        max_level = np.max(self._levels)
+        avg_level = np.mean(self._levels)
         
+        # Erstelle Säulen-Nummern (1-24) - statisch oben
+        column_numbers = ''.join([str(i % 10) for i in range(1, 25)])
+        
+        # Finde dunkelste Säulen (die nicht leuchten)
+        dark_columns = [i+1 for i, l in enumerate(self._levels) if l < 0.05]
+        dark_info = f" Dunkel:[{','.join(map(str, dark_columns))}]" if dark_columns else ""
+        
+        # Nutze ANSI-Codes um Cursor zu bewegen (keine neue Zeile)
+        print(f"\r    {column_numbers}", end='')
+        print(f"\r🔊 [{bars}] Max:{max_level:.2f} Avg:{avg_level:.2f} | FPS:{self.current_fps}{dark_info}".ljust(100), 
+              end='\r', flush=True)
+    
+    def _update_leds_fast(self, is_beat, beat_strength):
+        """Optimiertes LED-Update mit korrektem Mapping"""
+        beat_boost = 1.0 + (beat_strength if is_beat else 0.0)
+        
+        # Reset Arrays
+        for i in range(48):
+            self._leds_unten[i] = (0, 0, 0)
+            self._leds_oben[i] = (0, 0, 0)
+        
+        # Setze LEDs pro Säule
         for col in range(NUM_COLUMNS):
-            level = levels[col]
-            analyzer = self.band_analyzers[col]
-            
-            # Anzahl LEDs basierend auf Level
+            level = self._levels[DISPLAY_ORDER[col]]
             num_leds_lit = int(round(level * LEDS_PER_COLUMN))
             
+            if num_leds_lit == 0:
+                continue
+            
             # Farbe basierend auf Frequenz
-            hue = analyzer.get_color_hue()
+            analyzer = self.band_analyzers[col]
+            boost = beat_boost if analyzer.freq_max <= BASS_FREQ_MAX else 1.0
+            color = get_color_fast(analyzer.freq_max, level, boost)
             
-            # Helligkeit: höher bei höherem Level
-            value = 0.5 + 0.5 * level
+            # Mapping über vorberechnete Indices
+            mapping = self._column_to_leds[col]
             
-            # Bei Beat: erhöhe Sättigung für Bass-Säulen
-            if is_beat and analyzer.freq_max <= BASS_FREQ_MAX:
-                saturation = 1.0
-                value = min(value * (1.0 + beat_strength * 0.5), 1.0)
-            else:
-                saturation = 0.9
-            
-            rgb = hsv_to_rgb255(hue, saturation, value)
-            
-            # Setze LEDs von unten nach oben
             if num_leds_lit >= 1:
-                leds_unten[col] = rgb
-            
+                self._leds_unten[mapping['row1']] = color
             if num_leds_lit >= 2:
-                leds_unten[24 + col] = rgb
-            
+                self._leds_unten[mapping['row2']] = color
             if num_leds_lit >= 3:
-                leds_oben[col] = rgb
-            
+                self._leds_oben[mapping['row3']] = color
             if num_leds_lit >= 4:
-                leds_oben[24 + col] = rgb
+                self._leds_oben[mapping['row4']] = color
         
-        # Update beide Switches parallel
-        self.sw_unten.update_leds(leds_unten)
-        self.sw_oben.update_leds(leds_oben)
+        # Direkte Updates ohne Queue
+        self.sw_unten.update_direct(self._leds_unten)
+        self.sw_oben.update_direct(self._leds_oben)
     
     def cleanup(self):
         """Cleanup"""
-        print("\n🛑 Beende Visualizer...", flush=True)
+        print("\n🛑 Beende...", flush=True)
         self.running = False
         
         try:
@@ -563,14 +453,12 @@ class DualSwitchAudioVisualizer:
                 if self.stream.is_active():
                     self.stream.stop_stream()
                 self.stream.close()
-                self.stream = None
         except:
             pass
         
         try:
             if self.p:
                 self.p.terminate()
-                self.p = None
         except:
             pass
         
@@ -579,51 +467,52 @@ class DualSwitchAudioVisualizer:
         if self.sw_oben:
             self.sw_oben.cleanup()
         
-        try:
-            sys.stdout.flush()
-            sys.stderr.flush()
-        except:
-            pass
-        
         print("✓ Beendet", flush=True)
     
-    def run(self, device_index=None):
+    def run(self):
         """Hauptschleife"""
         try:
             self.p = pyaudio.PyAudio()
             
-            if device_index is None:
-                try:
-                    wasapi_info = self.p.get_host_api_info_by_type(pyaudio.paWASAPI)
-                    default_speakers = self.p.get_device_info_by_index(wasapi_info["defaultOutputDevice"])
-                    
-                    print(f"🔍 Lautsprecher: {default_speakers['name']}", flush=True)
-                    
-                    if not default_speakers.get("isLoopbackDevice", False):
-                        print("🔍 Suche Loopback...", flush=True)
-                        for loopback in self.p.get_loopback_device_info_generator():
-                            if default_speakers["name"] in loopback["name"]:
-                                default_speakers = loopback
-                                print(f"✓ Loopback: {loopback['name']}", flush=True)
-                                break
-                        else:
-                            print("✗ Kein Loopback!", flush=True)
-                            return
-                    
-                    device_index = default_speakers["index"]
-                    
-                except Exception as e:
-                    print(f"✗ Fehler: {e}", flush=True)
-                    return
+            # Finde Loopback
+            wasapi_info = self.p.get_host_api_info_by_type(pyaudio.paWASAPI)
+            default_speakers = self.p.get_device_info_by_index(wasapi_info["defaultOutputDevice"])
             
+            if not default_speakers.get("isLoopbackDevice", False):
+                for loopback in self.p.get_loopback_device_info_generator():
+                    if default_speakers["name"] in loopback["name"]:
+                        default_speakers = loopback
+                        break
+            
+            device_index = default_speakers["index"]
             device_info = self.p.get_device_info_by_index(device_index)
-            self.device_name = device_info['name']
             
-            print(f"\n🎵 Audio: {self.device_name}", flush=True)
-            print(f"📊 24 Frequenzbänder (optimiert 20-8000 Hz)", flush=True)
-            print(f"🎯 Ziel: {FPS_TARGET} FPS | Buffer: {BLOCKSIZE} samples", flush=True)
-            print(f"💥 Beat-Detection aktiv", flush=True)
-            print("⌨️  Drücke Ctrl+C zum Beenden\n", flush=True)
+            print(f"🎵 Audio: {device_info['name']}", flush=True)
+            print(f"📊 24 Frequenzbänder | Buffer: {BLOCKSIZE}", flush=True)
+            
+            if self.monitor_only:
+                print("\n" + "="*70)
+                print("MONITORING MODE - Säulen-Übersicht:")
+                print("="*70)
+                # Zeige Frequenzbänder für jede Säule
+                for i in range(0, 24, 6):  # 4 Zeilen mit je 6 Säulen
+                    line = ""
+                    for j in range(6):
+                        col = i + j
+                        if col < 24:
+                            fmin, fmax = FREQ_BANDS[col]
+                            # Formatierung: Säule [Freq-Range]
+                            if fmax >= 1000:
+                                line += f"{col+1:2d}[{fmin/1000:.1f}-{fmax/1000:.1f}k] "
+                            else:
+                                line += f"{col+1:2d}[{fmin:3.0f}-{fmax:3.0f}Hz] "
+                    print(line)
+                print("="*70)
+                print("Die Zahlenreihe zeigt Säulen-Nummern:")
+                print("    123456789012345678901234")
+                print()
+            
+            print("⌨️  Ctrl+C zum Beenden\n", flush=True)
             
             self.stream = self.p.open(
                 format=pyaudio.paInt16,
@@ -641,85 +530,82 @@ class DualSwitchAudioVisualizer:
                     data = self.stream.read(BLOCKSIZE, exception_on_overflow=False)
                     audio_data = np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
                     
-                    if len(audio_data) > BLOCKSIZE:
-                        audio_data = audio_data.reshape(-1, device_info['maxInputChannels']).mean(axis=1)
+                    # Multi-Channel zu Mono
+                    if audio_data.ndim > 1 or len(audio_data) > BLOCKSIZE:
+                        num_channels = device_info['maxInputChannels']
+                        if len(audio_data) >= BLOCKSIZE * num_channels:
+                            audio_data = audio_data[:BLOCKSIZE * num_channels].reshape(-1, num_channels).mean(axis=1)
+                        elif audio_data.ndim > 1:
+                            audio_data = audio_data.mean(axis=1)
                     
-                    self.process_audio(audio_data)
-                    
+                    self.process_audio_fast(audio_data)
                 except Exception as e:
                     if self.running:
-                        print(f"\n✗ Fehler: {e}", flush=True)
+                        print(f"\n✗ Audio-Fehler: {e}", flush=True)
                     break
                     
         except KeyboardInterrupt:
             print("\n⏸️  Unterbrochen", flush=True)
         except Exception as e:
             print(f"\n✗ Fehler: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
         finally:
             self.cleanup()
 
 
-def test_switches():
-    """LED-Test"""
-    print("\n" + "="*70)
-    print("  🧪 LED-MAPPING TEST")
-    print("="*70 + "\n")
+def test_mapping():
+    """Test des korrigierten LED-Mappings"""
+    print("\n🧪 LED-MAPPING TEST\n")
     
-    try:
-        sw_unten = SwitchController(SW_UNTEN_IP, "SW_UNTEN")
-        sw_oben = SwitchController(SW_OBEN_IP, "SW_OBEN")
+    sw_unten = OptimizedSwitchController(SW_UNTEN_IP, "SW_UNTEN")
+    sw_oben = OptimizedSwitchController(SW_OBEN_IP, "SW_OBEN")
+    
+    print("\nTest: Säulenweise von links nach rechts")
+    for col in range(24):
+        leds_unten = [(0, 0, 0)] * 48
+        leds_oben = [(0, 0, 0)] * 48
         
-        print("\nTest: Säulenweise (24 Säulen)")
-        for col in range(24):
-            leds_unten = [(0, 0, 0)] * 48
-            leds_oben = [(0, 0, 0)] * 48
-            
-            leds_unten[col] = (255, 0, 0)
-            leds_unten[24 + col] = (255, 128, 0)
-            leds_oben[col] = (255, 255, 0)
-            leds_oben[24 + col] = (0, 255, 0)
-            
-            sw_unten.update_leds(leds_unten)
-            sw_oben.update_leds(leds_oben)
-            
-            print(f"\r  Säule {col + 1}/24", end='', flush=True)
-            time.sleep(0.1)
+        # Reihe 1 (unten, ungerade Ports)
+        leds_unten[FIRST_ROW[col] - 1] = (255, 0, 0)
+        # Reihe 2 (unten, gerade Ports)
+        leds_unten[SECOND_ROW[col] - 1] = (255, 128, 0)
+        # Reihe 3 (oben, ungerade Ports)
+        leds_oben[FIRST_ROW[col] - 1] = (255, 255, 0)
+        # Reihe 4 (oben, gerade Ports)
+        leds_oben[SECOND_ROW[col] - 1] = (0, 255, 0)
         
-        print("\n✓ Test OK\n")
+        sw_unten.update_direct(leds_unten)
+        sw_oben.update_direct(leds_oben)
         
-        sw_unten.cleanup()
-        sw_oben.cleanup()
-        
-    except Exception as e:
-        print(f"\n✗ Fehler: {e}")
+        print(f"\rSäule {col + 1}/24", end='', flush=True)
+        time.sleep(0.15)
+    
+    print("\n✓ Test OK\n")
+    
+    sw_unten.cleanup()
+    sw_oben.cleanup()
 
 
-def music_play(monitor_only=False):
-    """Startet Visualizer"""
-    print("\n" + "="*70)
-    print("  🎛️  ADVANCED AUDIO VISUALIZER")
-    print("="*70)
-    print(f"  Features:")
-    print(f"    • 24 unabhängige Frequenzbänder")
-    print(f"    • Fokus auf 20-8000 Hz (Musik-Range)")
-    print(f"    • Beat-Detection (Bass/Kick)")
-    print(f"    • Frequenz-basierte Farben")
-    print(f"    • Multi-threaded (max. FPS)")
-    print(f"    • Buffer: {BLOCKSIZE} samples")
-    print("="*70 + "\n")
-    
-    viz = DualSwitchAudioVisualizer(monitor_only=monitor_only)
-    
-    try:
-        viz.run()
-    finally:
-        viz.cleanup()
-
+# ----------- MODE SELECTION -----------
+# 0 = Normal (LED-Visualisierung)
+# 1 = Test (LED-Mapping Test)
+# 2 = Monitoring (Audio-Monitoring ohne LEDs)
+MODE = 2
 
 if __name__ == '__main__':
     try:
-        music_play(False)
+        if MODE == 1:
+            test_mapping()
+        elif MODE == 2:
+            viz = OptimizedDualSwitchVisualizer(monitor_only=True)
+            viz.run()
+        else:
+            viz = OptimizedDualSwitchVisualizer(monitor_only=False)
+            viz.run()
     except KeyboardInterrupt:
         print("\n⏹ Beendet", flush=True)
     except Exception as e:
         print(f"\n✗ Fehler: {e}", flush=True)
+        import traceback
+        traceback.print_exc()

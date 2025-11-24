@@ -1,43 +1,16 @@
 import paramiko
 import time
-
-# ===./led_code
-# * Set port[1-52] LED with color code r[0-ff] g[0-ff] b[0-ff] and power level[1-100]
-# * Ex. "1 ff cc ff 100" to light port 1 with color code #ffccff and power level 100
-# ===./led_mode
-# 1
-# ===./led_color
-# * Set port[1-52] LED with color[r=Red g=Green b=Blue w=White] and follow with value[0-65535]
-# * Ex. "1 r 65535" to light port 1 red LED
-# ===./led_config
-# * Config LED: [0=Cold reset 1=Warm reset 2=Boot done]
-# ===./led_version
-# 1.0.1
-# ===./led_board_id
-# 1
-# ===./led_test_cmd
-# * LED test:
-# 	set_port  [port# rH rL gH gL bH bL wH wL]
-# 	all_port  [r|g|b|w|off|normal]
-# 	marquee   [1-65535]
-# 	byte      [1-65535]
-# 	solid     [1-65535]
-# 	time_calc [1-65535]
-# ===./led_all_port_code
-# * Set all ports' LED color code for r/g/b [00-FF] with power level [0-100]
-# * Ex. "FF 00 FF 100" to set all ports to color code r=FF g=00 b=FF with power level 100
-# ===./led_all_port_color
-# * Set all ports' LED r/g/b/w color [0-65535]
-# * Ex. "65535 32768 16384 0" to set all ports to r=65535 g=32768 b=16384 w=0
+from threading import Lock
 
 class Etherlight:
-    def __init__(self, ip, user: str = None, password: str = None, key_filename: str = None):
+    def __init__(self, ip, user: str = "nwlab", password: str = None, key_filename: str = None):
         self.ip = ip
         self.user = user if user else "root"
         self.ssh = paramiko.SSHClient()
         self.ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        self._lock = Lock()
+        self._channel = None
         
-        # Verbindung herstellen
         print(f"Versuche SSH-Verbindung zu {self.user}@{ip} herzustellen...")
         try:
             self.ssh.connect(
@@ -50,14 +23,15 @@ class Etherlight:
                 timeout=10
             )
             print(f"✓ SSH-Verbindung erfolgreich hergestellt zu {self.user}@{ip}")
+            
+            # Persistenten Channel für Shell-Zugriff öffnen
+            self._channel = self.ssh.invoke_shell()
+            self._channel.settimeout(0.5)
+            time.sleep(0.1)  # Kurz warten bis Shell bereit ist
+            self._channel.recv(4096)  # Initial prompt lesen und verwerfen
+            
         except paramiko.AuthenticationException:
             print(f"✗ SSH-Verbindung fehlgeschlagen: Authentifizierung abgelehnt")
-            raise
-        except paramiko.SSHException as e:
-            print(f"✗ SSH-Verbindung fehlgeschlagen: SSH-Fehler - {e}")
-            raise
-        except TimeoutError:
-            print(f"✗ SSH-Verbindung fehlgeschlagen: Timeout bei Verbindung zu {ip}")
             raise
         except Exception as e:
             print(f"✗ SSH-Verbindung fehlgeschlagen: {e}")
@@ -68,74 +42,93 @@ class Etherlight:
         self.led_cache = []
 
     def write_command(self, command, flush=False, silent=False):
+        """Optimierte Befehlsausführung mit persistentem Channel"""
         try:
-            stdin, stdout, stderr = self.ssh.exec_command(command)
-            if flush:
-                exit_status = stdout.channel.recv_exit_status()
-                error_output = stderr.read().decode('utf-8').strip()
-                
-                if not silent:
-                    if exit_status == 0:
-                        print(f"✓ Befehl erfolgreich ausgeführt")
-                    else:
-                        print(f"✗ Befehl fehlgeschlagen (Exit-Code: {exit_status})")
-                        if error_output:
-                            print(f"  Fehler: {error_output}")
-                
-                return exit_status == 0
+            with self._lock:
+                if self._channel and self._channel.active:
+                    # Verwende persistenten Channel (viel schneller!)
+                    self._channel.send(command + '\n')
+                    
+                    if flush:
+                        time.sleep(0.01)  # Minimal delay
+                        try:
+                            self._channel.recv(1024)  # Output verwerfen
+                        except:
+                            pass
+                    return True
+                else:
+                    # Fallback auf exec_command
+                    stdin, stdout, stderr = self.ssh.exec_command(command)
+                    if flush:
+                        exit_status = stdout.channel.recv_exit_status()
+                        return exit_status == 0
+                    return True
         except Exception as e:
             if not silent:
                 print(f"✗ Fehler beim Ausführen des Befehls: {e}")
             return False
 
-    def flush(self):
-        pass  # Bei paramiko nicht notwendig
-
     def set_led_values(self, led, r, g, b, a=100):
-        print(f"Setze LED {led} auf RGB({r}, {g}, {b}) mit Alpha={a}...")
-        command = f'echo "{led} r {r*100}" > /proc/led/led_color; '
-        command += f'echo "{led} g {g*100}" > /proc/led/led_color; '
-        command += f'echo "{led} b {b*100}" > /proc/led/led_color'
-        success = self.write_command(command, flush=True, silent=True)
-        if success:
-            print(f"✓ LED {led} erfolgreich gesetzt")
-        else:
-            print(f"✗ LED {led} konnte nicht gesetzt werden")
-        return success
+        """Direktes Setzen ohne Cache - optimiert für einzelne LEDs"""
+        # Alle drei Befehle in einem einzigen SSH-Aufruf
+        command = (f'echo "{led} r {r*100}" > /proc/led/led_color && '
+                  f'echo "{led} g {g*100}" > /proc/led/led_color && '
+                  f'echo "{led} b {b*100}" > /proc/led/led_color')
+        return self.write_command(command, flush=True, silent=True)
 
     def set_led_color(self, led, color, a=100):
         r, g, b = color
-        self.set_led_values(led, r, g, b, a)
+        return self.set_led_values(led, r, g, b, a)
 
     def cache_led_color(self, led, color, a=100):
-        self.led_cache.append(f'{led} {hex(color[0])[2:]} {hex(color[1])[2:]} {hex(color[2])[2:]} {a}')
+        """LED-Befehl zum Cache hinzufügen"""
+        self.led_cache.append(f'{led} {hex(color[0])[2:].zfill(2)} {hex(color[1])[2:].zfill(2)} {hex(color[2])[2:].zfill(2)} {a}')
 
     def flush_led_cache(self):
-        def chunks(lst, n):
-            """Yield successive n-sized chunks from lst."""
-            for i in range(0, len(lst), n):
-                yield lst[i:i + n]
-
-        print(f"Schreibe {len(self.led_cache)} zwischengespeicherte LED-Befehle...")
-        success_count = 0
-        chunk_count = 0
+        """Optimiertes Cache-Flush mit größeren Chunks"""
+        if not self.led_cache:
+            return
         
-        for chunk in chunks(self.led_cache, 15):
-            chunk_count += 1
+        # Größere Chunks für bessere Performance (50 statt 15)
+        chunk_size = 50
+        chunks = [self.led_cache[i:i + chunk_size] for i in range(0, len(self.led_cache), chunk_size)]
+        
+        # Alle Chunks in EINEM einzigen Befehl senden
+        all_commands = []
+        for chunk in chunks:
             command = "\\n".join(chunk)
-            success = self.write_command(f'printf "{command}" > /proc/led/led_code', True, silent=True)
-            if success:
-                success_count += 1
-
-        if success_count == chunk_count:
-            print(f"✓ Alle LED-Cache-Befehle erfolgreich geschrieben ({chunk_count} Chunks)")
-        else:
-            print(f"⚠ {success_count}/{chunk_count} Chunks erfolgreich geschrieben")
+            all_commands.append(f'printf "{command}" > /proc/led/led_code')
+        
+        # Mit && verketten für maximale Geschwindigkeit
+        combined_command = " && ".join(all_commands)
+        self.write_command(combined_command, flush=True, silent=True)
         
         self.led_cache = []
 
+    def set_all_leds(self, color, a=100):
+        """Optimierte Methode um alle LEDs gleichzeitig zu setzen"""
+        r, g, b = color
+        command = f'echo "{hex(r)[2:].zfill(2)} {hex(g)[2:].zfill(2)} {hex(b)[2:].zfill(2)} {a}" > /proc/led/led_all_port_code'
+        return self.write_command(command, flush=True, silent=True)
+
+    def batch_set_leds(self, led_colors):
+        """
+        Optimierte Batch-Operation für mehrere LEDs
+        led_colors: Liste von (led, (r, g, b), alpha) Tupeln
+        """
+        commands = []
+        for led, color, a in led_colors:
+            r, g, b = color
+            commands.append(f'echo "{led} {hex(r)[2:].zfill(2)} {hex(g)[2:].zfill(2)} {hex(b)[2:].zfill(2)} {a}" > /proc/led/led_code')
+        
+        # Alle Befehle mit && verketten
+        combined = " && ".join(commands)
+        return self.write_command(combined, flush=True, silent=True)
+
     def close(self):
         """SSH-Verbindung schließen"""
+        if self._channel:
+            self._channel.close()
         if self.ssh:
             self.ssh.close()
             print(f"✓ SSH-Verbindung zu {self.user}@{self.ip} geschlossen")
@@ -147,16 +140,25 @@ class Etherlight:
         self.close()
 
 
-# Beispiel für die Verwendung:
+# Beispiele für optimale Nutzung:
 if __name__ == "__main__":
-    # Mit Passwort:
-    # etherlight = Etherlight("192.168.1.100", user="admin", password="password")
-    
-    # Mit SSH-Key:
-    # etherlight = Etherlight("192.168.1.100", user="admin", key_filename="C:\\Users\\YourUser\\.ssh\\id_rsa")
-    
-    # Mit Context Manager (empfohlen):
-    # with Etherlight("192.168.1.100", user="admin", password="password") as etherlight:
-    #     etherlight.set_led_color(1, (255, 0, 255), 100)
-    
-    pass
+    with Etherlight("192.168.1.100", user="nwlab", password="password") as eth:
+        
+        # Methode 1: Einzelne LED (schnell)
+        eth.set_led_color(1, (255, 0, 255), 100)
+        
+        # Methode 2: Alle LEDs gleichzeitig (am schnellsten für alle)
+        eth.set_all_leds((255, 0, 255), 100)
+        
+        # Methode 3: Mehrere spezifische LEDs (optimal für Batch)
+        led_colors = [
+            (1, (255, 0, 0), 100),
+            (2, (0, 255, 0), 100),
+            (3, (0, 0, 255), 100),
+        ]
+        eth.batch_set_leds(led_colors)
+        
+        # Methode 4: Cache nutzen (gut für viele LEDs)
+        for i in range(1, 53):
+            eth.cache_led_color(i, (255, 255, 255), 50)
+        eth.flush_led_cache()

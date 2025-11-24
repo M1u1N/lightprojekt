@@ -31,7 +31,7 @@ import numpy as np
 import threading
 from queue import Queue
 from collections import deque
-from etherlight import Etherlight
+from etherlightwin import Etherlight
 
 # Scipy für bessere Filterung (optional)
 try:
@@ -44,8 +44,8 @@ except ImportError:
 
 # ----------- USER CONFIG -----------
 # Switch IPs
-SW_UNTEN_IP = "172.16.26.138"   # Unterer Switch (Reihe 1+2)
-SW_OBEN_IP = "172.16.26.139"    # Oberer Switch (Reihe 3+4)
+SW_UNTEN_IP = "172.16.146.212"    # Unterer Switch (Reihe 1+2)
+SW_OBEN_IP = "172.16.26.138"   # Oberer Switch (Reihe 3+4)
 
 # Soundbar Konfiguration
 NUM_COLUMNS = 24        # 24 Säulen horizontal
@@ -718,7 +718,7 @@ def music_play(monitor_only=False):
 
 if __name__ == '__main__':
     try:
-        music_play(True)
+        music_play(False)
     except KeyboardInterrupt:
         print("\n⏹ Beendet", flush=True)
     except Exception as e:

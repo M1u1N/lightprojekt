@@ -33,7 +33,7 @@ import shlex
 class Etherlight:
     def __init__(self, ip,user: str = None):
         self.ip = ip
-        self.ssh_target = f"{user}@{ip}" if user else ip
+        self.ssh_target = f"{user}@{ip}"
         self.proc = Popen(shlex.split(f"ssh {self.ssh_target}"), stdin=PIPE, universal_newlines=True)
         self.write_command('echo "0" > /proc/led/led_mode', True)
         self.led_cache = []

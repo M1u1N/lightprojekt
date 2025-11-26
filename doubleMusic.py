@@ -1,10 +1,11 @@
 """
-Etherlight Dual-Switch Audio Visualizer - OPTIMIZED VERSION
+Etherlight Dual-Switch Audio Visualizer - KORRIGIERTES MAPPING
 
 Soundbar-Aufbau (KORRIGIERT):
     - 24 Säulen (horizontal) × 4 LEDs hoch (vertikal) = 96 LEDs gesamt
-    - Switch Unten: Port 1,3,5,7... = Reihe 1 | Port 2,4,6,8... = Reihe 2
-    - Switch Oben:  Port 1,3,5,7... = Reihe 3 | Port 2,4,6,8... = Reihe 4
+    - Säule 1 beginnt bei Port 2 (SW_UNTEN)!
+    - Switch Unten: Port 2,4,6,8... = Reihe 1 (unterste) | Port 1,3,5,7... = Reihe 2
+    - Switch Oben:  Port 2,4,6,8... = Reihe 3 | Port 1,3,5,7... = Reihe 4 (oberste)
 
 Performance-Optimierungen:
     ✓ Vorberechnete LED-Mappings
@@ -33,9 +34,11 @@ try:
 except ImportError:
     HAS_SCIPY = False
 
-# ----------- KORREKTE LED-MAPPINGS -----------
-FIRST_ROW = [1,3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,35,37,39,41,43,45,47]
-SECOND_ROW = [2,4,6,8,10,12,14,16,18,20,22,24,26,28,30,32,34,36,38,40,42,44,46,48]
+# ----------- KORRIGIERTES LED-MAPPING -----------
+# Reihe 1 (unterste): GERADE Ports (2,4,6,8...)
+# Reihe 2: UNGERADE Ports (1,3,5,7...)
+FIRST_ROW = [2,4,6,8,10,12,14,16,18,20,22,24,26,28,30,32,34,36,38,40,42,44,46,48]
+SECOND_ROW = [1,3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,35,37,39,41,43,45,47]
 
 # ----------- USER CONFIG -----------
 SW_UNTEN_IP = "172.16.146.212"
@@ -57,15 +60,14 @@ FREQ_BANDS = [
     (7000, 8800), (8800, 11000), (11000, 14000), (14000, 18000)
 ]
 
-
 # Verarbeitung
-DECAY_FAST = 0.80       # Noch langsamer = LEDs bleiben noch länger an
-DECAY_SLOW = 0.94       # Noch langsamer = smooth
-MIN_DB = -95.0          # Noch niedriger = noch empfindlicher
-MAX_DB = -3.0           # Noch höher = mehr Dynamik
-BASS_BOOST = 1.8        # Extra Verstärkung für Bass
-MID_BOOST = 2.0         # Extra Verstärkung für Mitten (500-2000Hz)
-HIGH_BOOST = 2.2        # Extra Verstärkung für Höhen (>5kHz)
+DECAY_FAST = 0.80
+DECAY_SLOW = 0.94
+MIN_DB = -95.0
+MAX_DB = -3.0
+BASS_BOOST = 1.8
+MID_BOOST = 2.0
+HIGH_BOOST = 2.2
 
 # Beat-Detection
 BEAT_HISTORY_SIZE = 43
@@ -73,10 +75,6 @@ BEAT_THRESHOLD = 1.5
 BEAT_MIN_INTERVAL = 0.1
 BASS_BOOST_ON_BEAT = 2.5
 BASS_FREQ_MAX = 200
-
-DISPLAY_ORDER = list(range(NUM_COLUMNS))
-random.shuffle(DISPLAY_ORDER)
-
 
 # PyAudio
 try:
@@ -89,7 +87,6 @@ except ImportError:
 
 
 # ----------- OPTIMIERTE COLOR FUNCTIONS -----------
-# Vorberechnete Lookup-Tables für schnellere Farbberechnung
 COLOR_LUT_SIZE = 256
 _color_lut = None
 
@@ -99,7 +96,6 @@ def init_color_lut():
     _color_lut = np.zeros((COLOR_LUT_SIZE, 3), dtype=np.uint8)
     
     for i in range(COLOR_LUT_SIZE):
-        # 0 = Bass (Rot), 128 = Mids (Gelb), 255 = Highs (Blau)
         t = i / COLOR_LUT_SIZE
         
         if t < 0.33:  # Bass -> Mids
@@ -122,21 +118,16 @@ def init_color_lut():
 
 def get_color_fast(freq_max, level, beat_boost=1.0):
     """Ultra-schnelle Farbberechnung mit LUT"""
-    # Frequenz zu LUT-Index
     if freq_max <= 200:
         idx = 0
     elif freq_max >= 18000:
         idx = COLOR_LUT_SIZE - 1
     else:
-        # Log-Scale für bessere Verteilung
         idx = int((np.log10(freq_max) - np.log10(200)) / 
                   (np.log10(18000) - np.log10(200)) * COLOR_LUT_SIZE)
         idx = max(0, min(COLOR_LUT_SIZE - 1, idx))
     
-    # Basis-Farbe aus LUT
     r, g, b = _color_lut[idx]
-    
-    # Helligkeit basierend auf Level
     brightness = 0.3 + 0.7 * level * beat_boost
     brightness = min(1.0, brightness)
     
@@ -164,14 +155,12 @@ class BeatDetector:
     
     def detect_beat(self, bass_energy):
         """Schnelle Beat-Detection mit Ring-Buffer"""
-        # Ring-Buffer für schnelleren Zugriff
         self._history_array[self._idx] = bass_energy
         self._idx = (self._idx + 1) % len(self._history_array)
         
         if np.count_nonzero(self._history_array) < 10:
             return False, 0.0
         
-        # Numpy-optimierte Statistiken
         avg = np.mean(self._history_array)
         std = np.std(self._history_array)
         threshold = avg + (std * BEAT_THRESHOLD)
@@ -198,7 +187,6 @@ class FastBandAnalyzer:
         self.freq_max = freq_max
         self.prev_level = 0.0
         
-        # Decay basierend auf Frequenz
         if freq_max < 200:
             self.decay = DECAY_SLOW
         elif freq_min > 5000:
@@ -207,7 +195,6 @@ class FastBandAnalyzer:
             t = (freq_min - 200) / (5000 - 200)
             self.decay = DECAY_SLOW + (DECAY_FAST - DECAY_SLOW) * t
         
-        # Vorberechne FFT-Indices für dieses Band
         self.fft_size = BLOCKSIZE // 2 + 1
         freqs = np.fft.rfftfreq(BLOCKSIZE, 1.0 / sample_rate)
         self.idx_mask = (freqs >= freq_min) & (freqs <= freq_max)
@@ -219,26 +206,19 @@ class FastBandAnalyzer:
             self.prev_level *= self.decay
             return self.prev_level
         
-        # Numpy-Vektor-Operationen
         band_amplitude = np.mean(fft_data[self.idx_mask])
         band_amplitude = band_amplitude / (BLOCKSIZE * 2)
         
-        # Extra Boost basierend auf Frequenzbereich
         if self.freq_min > 5000:
-            # Hohe Frequenzen (>5kHz)
             band_amplitude *= HIGH_BOOST
         elif 500 <= self.freq_min <= 2000:
-            # Mitten (500-2000Hz) - oft schwach
             band_amplitude *= MID_BOOST
         elif self.freq_max < 200:
-            # Bass (<200Hz)
             band_amplitude *= BASS_BOOST
         
-        # Schnelle dB-Konvertierung
         band_db = 20.0 * np.log10(max(band_amplitude, 1e-12))
         level = max(0.0, min(1.0, (band_db - MIN_DB) / (MAX_DB - MIN_DB)))
         
-        # Smooth decay
         self.prev_level = max(level, self.prev_level * self.decay)
         return self.prev_level
 
@@ -253,7 +233,6 @@ class OptimizedSwitchController:
         time.sleep(0.3)
         print(f"✓ {name} verbunden", flush=True)
         
-        # Vorallokierte Arrays
         self._led_buffer = [(0, 0, 0)] * 48
     
     def update_direct(self, led_colors):
@@ -283,47 +262,39 @@ class OptimizedDualSwitchVisualizer:
         self.monitor_only = monitor_only
         self.running = True
         
-        # Initialisiere Color LUT
         init_color_lut()
         
-        # Band-Analyzer mit vorberechneten Indices
         self.band_analyzers = [
             FastBandAnalyzer(i, fmin, fmax) 
             for i, (fmin, fmax) in enumerate(FREQ_BANDS)
         ]
         
-        # Beat-Detector
         self.beat_detector = BeatDetector()
         
-        # Vorallokierte Arrays für maximale Performance
         self._levels = np.zeros(NUM_COLUMNS, dtype=np.float32)
         self._leds_unten = [(0, 0, 0)] * 48
         self._leds_oben = [(0, 0, 0)] * 48
         
-        # Vorberechnete LED-Mappings für O(1) Zugriff
+        # KORRIGIERTES LED-Mapping
         self._column_to_leds = []
         for col in range(NUM_COLUMNS):
             self._column_to_leds.append({
-                'row1': FIRST_ROW[col] - 1,   # Unten Reihe 1
-                'row2': SECOND_ROW[col] - 1,  # Unten Reihe 2
-                'row3': FIRST_ROW[col] - 1,   # Oben Reihe 3
-                'row4': SECOND_ROW[col] - 1   # Oben Reihe 4
+                'row1': FIRST_ROW[col] - 1,   # Unten Reihe 1 (GERADE Ports)
+                'row2': SECOND_ROW[col] - 1,  # Unten Reihe 2 (UNGERADE Ports)
+                'row3': FIRST_ROW[col] - 1,   # Oben Reihe 3 (GERADE Ports)
+                'row4': SECOND_ROW[col] - 1   # Oben Reihe 4 (UNGERADE Ports)
             })
         
-        # FFT Window vorberechnen
         self._window = np.hanning(BLOCKSIZE)
         
-        # Stats
         self.frame_count = 0
         self.last_stats_time = time.time()
         self.current_fps = 0
         self.fps_samples = deque(maxlen=30)
         
-        # Audio
         self.p = None
         self.stream = None
         
-        # Switches
         if not monitor_only:
             print("\n🎛️  Initialisiere Switches...")
             self.sw_unten = OptimizedSwitchController(SW_UNTEN_IP, "SW_UNTEN")
@@ -335,36 +306,26 @@ class OptimizedDualSwitchVisualizer:
     
     def process_audio_fast(self, audio_data):
         """Ultra-optimierte Audio-Verarbeitung"""
-        # Stelle sicher dass audio_data die richtige Länge hat
         if len(audio_data) != BLOCKSIZE:
             if len(audio_data) < BLOCKSIZE:
-                # Padding mit Nullen
                 audio_data = np.pad(audio_data, (0, BLOCKSIZE - len(audio_data)), mode='constant')
             else:
-                # Trimmen auf BLOCKSIZE
                 audio_data = audio_data[:BLOCKSIZE]
         
-        # Windowing
         audio_data = audio_data * self._window
-        
-        # FFT
         fft = np.abs(np.fft.rfft(audio_data))
         
-        # Bass-Energie für Beat
         bass_energy = np.mean(fft[:int(BASS_FREQ_MAX * BLOCKSIZE / SAMPLE_RATE)])
         is_beat, beat_strength = self.beat_detector.detect_beat(bass_energy)
         
-        # Analysiere alle Bänder parallel
         for i, analyzer in enumerate(self.band_analyzers):
             level = analyzer.analyze_fast(fft)
             
-            # Bass-Boost bei Beat
             if analyzer.freq_max <= BASS_FREQ_MAX and is_beat:
                 level = min(level * (1.0 + beat_strength), 1.0)
             
             self._levels[i] = level
         
-        # Stats
         self.frame_count += 1
         current_time = time.time()
         elapsed = current_time - self.last_stats_time
@@ -393,14 +354,10 @@ class OptimizedDualSwitchVisualizer:
         max_level = np.max(self._levels)
         avg_level = np.mean(self._levels)
         
-        # Erstelle Säulen-Nummern (1-24) - statisch oben
         column_numbers = ''.join([str(i % 10) for i in range(1, 25)])
-        
-        # Finde dunkelste Säulen (die nicht leuchten)
         dark_columns = [i+1 for i, l in enumerate(self._levels) if l < 0.05]
         dark_info = f" Dunkel:[{','.join(map(str, dark_columns))}]" if dark_columns else ""
         
-        # Nutze ANSI-Codes um Cursor zu bewegen (keine neue Zeile)
         print(f"\r    {column_numbers}", end='')
         print(f"\r🔊 [{bars}] Max:{max_level:.2f} Avg:{avg_level:.2f} | FPS:{self.current_fps}{dark_info}".ljust(100), 
               end='\r', flush=True)
@@ -409,25 +366,21 @@ class OptimizedDualSwitchVisualizer:
         """Optimiertes LED-Update mit korrektem Mapping"""
         beat_boost = 1.0 + (beat_strength if is_beat else 0.0)
         
-        # Reset Arrays
         for i in range(48):
             self._leds_unten[i] = (0, 0, 0)
             self._leds_oben[i] = (0, 0, 0)
         
-        # Setze LEDs pro Säule
         for col in range(NUM_COLUMNS):
-            level = self._levels[DISPLAY_ORDER[col]]
+            level = self._levels[col]
             num_leds_lit = int(round(level * LEDS_PER_COLUMN))
             
             if num_leds_lit == 0:
                 continue
             
-            # Farbe basierend auf Frequenz
             analyzer = self.band_analyzers[col]
             boost = beat_boost if analyzer.freq_max <= BASS_FREQ_MAX else 1.0
             color = get_color_fast(analyzer.freq_max, level, boost)
             
-            # Mapping über vorberechnete Indices
             mapping = self._column_to_leds[col]
             
             if num_leds_lit >= 1:
@@ -439,7 +392,6 @@ class OptimizedDualSwitchVisualizer:
             if num_leds_lit >= 4:
                 self._leds_oben[mapping['row4']] = color
         
-        # Direkte Updates ohne Queue
         self.sw_unten.update_direct(self._leds_unten)
         self.sw_oben.update_direct(self._leds_oben)
     
@@ -474,7 +426,6 @@ class OptimizedDualSwitchVisualizer:
         try:
             self.p = pyaudio.PyAudio()
             
-            # Finde Loopback
             wasapi_info = self.p.get_host_api_info_by_type(pyaudio.paWASAPI)
             default_speakers = self.p.get_device_info_by_index(wasapi_info["defaultOutputDevice"])
             
@@ -494,14 +445,12 @@ class OptimizedDualSwitchVisualizer:
                 print("\n" + "="*70)
                 print("MONITORING MODE - Säulen-Übersicht:")
                 print("="*70)
-                # Zeige Frequenzbänder für jede Säule
-                for i in range(0, 24, 6):  # 4 Zeilen mit je 6 Säulen
+                for i in range(0, 24, 6):
                     line = ""
                     for j in range(6):
                         col = i + j
                         if col < 24:
                             fmin, fmax = FREQ_BANDS[col]
-                            # Formatierung: Säule [Freq-Range]
                             if fmax >= 1000:
                                 line += f"{col+1:2d}[{fmin/1000:.1f}-{fmax/1000:.1f}k] "
                             else:
@@ -530,7 +479,6 @@ class OptimizedDualSwitchVisualizer:
                     data = self.stream.read(BLOCKSIZE, exception_on_overflow=False)
                     audio_data = np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
                     
-                    # Multi-Channel zu Mono
                     if audio_data.ndim > 1 or len(audio_data) > BLOCKSIZE:
                         num_channels = device_info['maxInputChannels']
                         if len(audio_data) >= BLOCKSIZE * num_channels:
@@ -555,33 +503,64 @@ class OptimizedDualSwitchVisualizer:
 
 
 def test_mapping():
-    """Test des korrigierten LED-Mappings"""
-    print("\n🧪 LED-MAPPING TEST\n")
+    """Erweiterter LED-Mapping Test - KORRIGIERT"""
+    print("\n" + "="*70)
+    print("🧪 KORRIGIERTER LED-MAPPING TEST")
+    print("="*70)
+    print("\nFarb-Code:")
+    print("  🔴 Rot    = Reihe 1 (unterste Reihe) - Port 2,4,6,8...")
+    print("  🟠 Orange = Reihe 2                  - Port 1,3,5,7...")
+    print("  🟡 Gelb   = Reihe 3                  - Port 2,4,6,8...")
+    print("  🟢 Grün   = Reihe 4 (oberste Reihe)  - Port 1,3,5,7...")
+    print("\n" + "="*70 + "\n")
     
     sw_unten = OptimizedSwitchController(SW_UNTEN_IP, "SW_UNTEN")
     sw_oben = OptimizedSwitchController(SW_OBEN_IP, "SW_OBEN")
     
-    print("\nTest: Säulenweise von links nach rechts")
+    print("Test läuft säulenweise von LINKS nach RECHTS...\n")
+    time.sleep(1)
+    
     for col in range(24):
         leds_unten = [(0, 0, 0)] * 48
         leds_oben = [(0, 0, 0)] * 48
         
-        # Reihe 1 (unten, ungerade Ports)
-        leds_unten[FIRST_ROW[col] - 1] = (255, 0, 0)
-        # Reihe 2 (unten, gerade Ports)
-        leds_unten[SECOND_ROW[col] - 1] = (255, 128, 0)
-        # Reihe 3 (oben, ungerade Ports)
-        leds_oben[FIRST_ROW[col] - 1] = (255, 255, 0)
-        # Reihe 4 (oben, gerade Ports)
-        leds_oben[SECOND_ROW[col] - 1] = (0, 255, 0)
+        # Reihe 1 (unten, FIRST_ROW = GERADE Ports)
+        port_r1 = FIRST_ROW[col]
+        leds_unten[port_r1 - 1] = (255, 0, 0)  # Rot
+        
+        # Reihe 2 (unten, SECOND_ROW = UNGERADE Ports)
+        port_r2 = SECOND_ROW[col]
+        leds_unten[port_r2 - 1] = (255, 128, 0)  # Orange
+        
+        # Reihe 3 (oben, FIRST_ROW = GERADE Ports)
+        port_r3 = FIRST_ROW[col]
+        leds_oben[port_r3 - 1] = (255, 255, 0)  # Gelb
+        
+        # Reihe 4 (oben, SECOND_ROW = UNGERADE Ports)
+        port_r4 = SECOND_ROW[col]
+        leds_oben[port_r4 - 1] = (0, 255, 0)  # Grün
         
         sw_unten.update_direct(leds_unten)
         sw_oben.update_direct(leds_oben)
         
-        print(f"\rSäule {col + 1}/24", end='', flush=True)
-        time.sleep(0.15)
+        print(f"📍 Säule {col + 1}/24:")
+        print(f"   SW_UNTEN: 🔴 Port {port_r1:2d} (Reihe 1) | 🟠 Port {port_r2:2d} (Reihe 2)")
+        print(f"   SW_OBEN:  🟡 Port {port_r3:2d} (Reihe 3) | 🟢 Port {port_r4:2d} (Reihe 4)")
+        print(f"   → Säule 1 beginnt jetzt bei Port 2 (SW_UNTEN)!\n")
+        
+        time.sleep(0.8)
     
-    print("\n✓ Test OK\n")
+    print("="*70)
+    print("✅ TEST ABGESCHLOSSEN")
+    print("="*70)
+    print("\nWas du sehen solltest:")
+    print("  • Säule 1 beginnt bei Port 2 (SW_UNTEN) mit 🔴 Rot")
+    print("  • Pro Säule leuchten 4 LEDs vertikal:")
+    print("    - 🔴 Rot    (Port 2,4,6...) ganz UNTEN")
+    print("    - 🟠 Orange (Port 1,3,5...) darüber")
+    print("    - 🟡 Gelb   (Port 2,4,6...) darüber")
+    print("    - 🟢 Grün   (Port 1,3,5...) ganz OBEN")
+    print("="*70 + "\n")
     
     sw_unten.cleanup()
     sw_oben.cleanup()
@@ -591,7 +570,7 @@ def test_mapping():
 # 0 = Normal (LED-Visualisierung)
 # 1 = Test (LED-Mapping Test)
 # 2 = Monitoring (Audio-Monitoring ohne LEDs)
-MODE = 2
+MODE = 0
 
 if __name__ == '__main__':
     try:

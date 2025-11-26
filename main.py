@@ -31,10 +31,10 @@ class MainWindow(QWidget):
         self.processes: list[subprocess.Popen] = []
 
         # Buttons
-        btn1 = QPushButton("Öffne music")
+        btn1 = QPushButton("Öffne Knight rider 2")
         btn2 = QPushButton("Öffne double Music")
         btn3 = QPushButton("Öffne Knight Rider")
-        btn4 = QPushButton("Öffne Test Rider")
+        btn4 = QPushButton("Öffne knight Rider 3")
         btn_stop_all = QPushButton("Stoppe alle Subprozesse")
 
         # Events
@@ -62,7 +62,7 @@ class MainWindow(QWidget):
     def open_window_a(self):
         # Falls music_play ein externes Script starten soll, benutze start_process()
         # hier nur ein Beispiel: subprocess starten
-        self.start_process([sys.executable, "music.py"], "music.py")
+        self.start_process([sys.executable, "knightrider2.py"], "knightrider2.py")
 
     def open_window_b(self):
         self.start_process([sys.executable, "doubleMusic.py"], "doubleMusic.py")
@@ -73,7 +73,7 @@ class MainWindow(QWidget):
 
     # Startet testrider.py und speichert den Prozess
     def start_testrider(self):
-        self.start_process([sys.executable, "testrider.py"], "testrider.py")
+        self.start_process([sys.executable, "knightrider3.py"], "knightrider3.py")
 
     # Hilfsfunktion: Prozess starten und referenz speichern
     def start_process(self, cmd: list[str], name: str = ""):

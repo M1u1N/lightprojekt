@@ -3,9 +3,9 @@ import time
 from threading import Lock
 
 class Etherlight:
-    def __init__(self, ip, user: str = "nwlab", password: str = None, key_filename: str = None):
+    def __init__(self, ip, user: str = "nwlab"):
         self.ip = ip
-        self.user = user if user else "root"
+        self.user = user
         self.ssh = paramiko.SSHClient()
         self.ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         self._lock = Lock()
@@ -13,22 +13,16 @@ class Etherlight:
         
         print(f"Versuche SSH-Verbindung zu {self.user}@{ip} herzustellen...")
         try:
-            self.ssh.connect(
-                hostname=ip,
-                username=self.user,
-                password=password,
-                key_filename=key_filename,
-                look_for_keys=True if not password else False,
-                allow_agent=True if not password else False,
-                timeout=10
-            )
+            self.ssh.connect(ip, username=user)
+            
+            # Keep-Alive aktivieren
+            transport = self.ssh.get_transport()
+            transport.set_keepalive(30)
+            
             print(f"✓ SSH-Verbindung erfolgreich hergestellt zu {self.user}@{ip}")
             
             # Persistenten Channel für Shell-Zugriff öffnen
-            self._channel = self.ssh.invoke_shell()
-            self._channel.settimeout(0.5)
-            time.sleep(0.1)  # Kurz warten bis Shell bereit ist
-            self._channel.recv(4096)  # Initial prompt lesen und verwerfen
+            self._open_channel()
             
         except paramiko.AuthenticationException:
             print(f"✗ SSH-Verbindung fehlgeschlagen: Authentifizierung abgelehnt")
@@ -41,18 +35,34 @@ class Etherlight:
         print("✓ LED-Modus initialisiert")
         self.led_cache = []
 
+    def _open_channel(self):
+        """Öffnet einen neuen Channel"""
+        try:
+            self._channel = self.ssh.invoke_shell()
+            self._channel.settimeout(0.5)
+            time.sleep(0.1)
+            self._channel.recv(4096)
+        except Exception as e:
+            print(f"⚠ Fehler beim Öffnen des Channels: {e}")
+            self._channel = None
+
     def write_command(self, command, flush=False, silent=False):
-        """Optimierte Befehlsausführung mit persistentem Channel"""
+        """Optimierte Befehlsausführung mit automatischem Reconnect"""
         try:
             with self._lock:
+                # Channel-Check und ggf. neu öffnen
+                if not self._channel or not self._channel.active:
+                    if not silent:
+                        print("⚠ Channel inaktiv, öffne neu...")
+                    self._open_channel()
+                
                 if self._channel and self._channel.active:
-                    # Verwende persistenten Channel (viel schneller!)
                     self._channel.send(command + '\n')
                     
                     if flush:
-                        time.sleep(0.01)  # Minimal delay
+                        time.sleep(0.02)
                         try:
-                            self._channel.recv(1024)  # Output verwerfen
+                            self._channel.recv(2048)
                         except:
                             pass
                     return True
@@ -66,14 +76,16 @@ class Etherlight:
         except Exception as e:
             if not silent:
                 print(f"✗ Fehler beim Ausführen des Befehls: {e}")
+            # Versuche Channel neu zu öffnen
+            try:
+                self._open_channel()
+            except:
+                pass
             return False
 
     def set_led_values(self, led, r, g, b, a=100):
         """Direktes Setzen ohne Cache - optimiert für einzelne LEDs"""
-        # Alle drei Befehle in einem einzigen SSH-Aufruf
-        command = (f'echo "{led} r {r*100}" > /proc/led/led_color && '
-                  f'echo "{led} g {g*100}" > /proc/led/led_color && '
-                  f'echo "{led} b {b*100}" > /proc/led/led_color')
+        command = f'echo "{led} {hex(r)[2:].zfill(2)} {hex(g)[2:].zfill(2)} {hex(b)[2:].zfill(2)} {a}" > /proc/led/led_code'
         return self.write_command(command, flush=True, silent=True)
 
     def set_led_color(self, led, color, a=100):
@@ -89,17 +101,14 @@ class Etherlight:
         if not self.led_cache:
             return
         
-        # Größere Chunks für bessere Performance (50 statt 15)
         chunk_size = 50
         chunks = [self.led_cache[i:i + chunk_size] for i in range(0, len(self.led_cache), chunk_size)]
         
-        # Alle Chunks in EINEM einzigen Befehl senden
         all_commands = []
         for chunk in chunks:
             command = "\\n".join(chunk)
             all_commands.append(f'printf "{command}" > /proc/led/led_code')
         
-        # Mit && verketten für maximale Geschwindigkeit
         combined_command = " && ".join(all_commands)
         self.write_command(combined_command, flush=True, silent=True)
         
@@ -116,6 +125,9 @@ class Etherlight:
         Optimierte Batch-Operation für mehrere LEDs
         led_colors: Liste von (led, (r, g, b), alpha) Tupeln
         """
+        if not led_colors:
+            return True
+            
         commands = []
         for led, color, a in led_colors:
             r, g, b = color
@@ -128,37 +140,19 @@ class Etherlight:
     def close(self):
         """SSH-Verbindung schließen"""
         if self._channel:
-            self._channel.close()
+            try:
+                self._channel.close()
+            except:
+                pass
         if self.ssh:
-            self.ssh.close()
-            print(f"✓ SSH-Verbindung zu {self.user}@{self.ip} geschlossen")
+            try:
+                self.ssh.close()
+                print(f"✓ SSH-Verbindung zu {self.user}@{self.ip} geschlossen")
+            except:
+                pass
 
     def __enter__(self):
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
-
-
-# Beispiele für optimale Nutzung:
-if __name__ == "__main__":
-    with Etherlight("192.168.1.100", user="nwlab", password="password") as eth:
-        
-        # Methode 1: Einzelne LED (schnell)
-        eth.set_led_color(1, (255, 0, 255), 100)
-        
-        # Methode 2: Alle LEDs gleichzeitig (am schnellsten für alle)
-        eth.set_all_leds((255, 0, 255), 100)
-        
-        # Methode 3: Mehrere spezifische LEDs (optimal für Batch)
-        led_colors = [
-            (1, (255, 0, 0), 100),
-            (2, (0, 255, 0), 100),
-            (3, (0, 0, 255), 100),
-        ]
-        eth.batch_set_leds(led_colors)
-        
-        # Methode 4: Cache nutzen (gut für viele LEDs)
-        for i in range(1, 53):
-            eth.cache_led_color(i, (255, 255, 255), 50)
-        eth.flush_led_cache()

@@ -4,3 +4,4 @@ numpy
 pyaudiowpatch
 scipy
 paramiko
+keyboard

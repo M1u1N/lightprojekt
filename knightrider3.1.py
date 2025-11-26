@@ -1,5 +1,4 @@
 from etherlightwin import Etherlight
-import time
 
 # Nur ein Switch
 SWITCH_IP = "172.16.26.138"
@@ -16,22 +15,24 @@ SECOND_ROW = [
     34,36,38,40,42,44,46,48
 ]
 
-# Farben (Name -> RGB) mit Alpha-Werten
+# Farben (Name -> RGB) mit Alpha-Werten - 5 LEDs gleichzeitig
 COLOR_MAP = {
     'main':   ((190, 0, 0), 255),    # maximale Helligkeit
     'trail1': ((255, 0, 0), 180),    # hell
     'trail2': ((220, 0, 0), 100),    # mittel
     'trail3': ((100, 0, 0), 30),     # sehr gedimmt
+    'trail4': ((50, 0, 0), 15),      # neu: noch dunkler
     'off':    ((0, 0, 0), 0)         # aus
 }
 
 # Priorität für Überlappungen
 COLOR_PRIORITY = {
     'off': 0,
-    'trail3': 1,
-    'trail2': 2,
-    'trail1': 3,
-    'main': 4
+    'trail4': 1,
+    'trail3': 2,
+    'trail2': 3,
+    'trail1': 4,
+    'main': 5
 }
 
 def compute_pingpong_pos(step, n):
@@ -71,21 +72,23 @@ def build_frame_for_row(row, step):
     # Hauptlicht (Kopf)
     try_set(pos, 'main')
 
-    # Trails je nach Richtung hinter dem Kopf platzieren
+    # 4 Trails je nach Richtung hinter dem Kopf platzieren
     if direction == 1:
         try_set(pos - 1, 'trail1')
         try_set(pos - 2, 'trail2')
         try_set(pos - 3, 'trail3')
+        try_set(pos - 4, 'trail4')
     else:
         try_set(pos + 1, 'trail1')
         try_set(pos + 2, 'trail2')
         try_set(pos + 3, 'trail3')
+        try_set(pos + 4, 'trail4')
 
     return {led: color_name for led, color_name in frame.items()}
 
-def animate_rows(etherlight, rows, step_delay=0.08):
+def animate_rows(etherlight, rows):
     """
-    Animation mit verbesserter Stabilität und Alpha-Unterstützung
+    Animation ohne jegliche Delays - maximale Geschwindigkeit
     """
     # Alle verwendeten LEDs sammeln
     all_leds = set()
@@ -124,11 +127,9 @@ def animate_rows(etherlight, rows, step_delay=0.08):
                         if error_count >= max_errors:
                             print(f"\n⚠ Zu viele Fehler ({error_count}), beende Animation")
                             break
-                        time.sleep(0.1)  # Kurze Pause bei Fehler
                     else:
                         error_count = 0  # Reset bei Erfolg
 
-                time.sleep(step_delay)
                 step += 1
 
             except Exception as e:
@@ -137,7 +138,6 @@ def animate_rows(etherlight, rows, step_delay=0.08):
                 if error_count >= max_errors:
                     print("Zu viele Fehler, beende Animation")
                     break
-                time.sleep(0.2)
 
     except KeyboardInterrupt:
         print("\nAnimation gestoppt (Ctrl+C)")
@@ -166,6 +166,6 @@ def run_sw(sw_ip, rows_to_run, user="nwlab"):
 
 # Beide Reihen laufen immer
 rows = [FIRST_ROW, SECOND_ROW]
-print(">>> Starte beide Reihen")
+print(">>> Starte beide Reihen - 5 LEDs gleichzeitig, ohne Delay")
 
 run_sw(SWITCH_IP, rows, user="nwlab")
